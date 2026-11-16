@@ -1,4 +1,5 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { api, APP_VERSION, hostOf, logLine, platform, type UpdateInfo } from "../api";
 import { useStore } from "../store";
 import { Modal, Toggle } from "../components/ui";
@@ -9,7 +10,7 @@ import { IBack, IBoltF, IBroom, IChevR, IHeart, IInfo, ILink, ILockF, IMoon, IRe
 /* 独立设置页：线路 / 外观 / 播放 / 本地数据 / 清理缓存 / 网络诊断 / 关于
    入口：Windows 侧栏「设置」、Android「我的」右上角齿轮 */
 export default function Settings({ onBack, wide }: { onBack: () => void; wide: boolean }) {
-  const { theme, setTheme, favs, history, muteOnStartup, setMuteOnStartup, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast } = useStore();
+  const { theme, setTheme, favs, history, muteOnStartup, setMuteOnStartup, prefetchNext, setPrefetchNext, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast, exportBackup, importBackup } = useStore();
   const [about, setAbout] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -17,8 +18,57 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
   const [lineBase, setLineBase] = useState("");
   const [checking, setChecking] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [pasteOpenState, setPasteOpenState] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const importInputRef = useRef<HTMLInputElement>(null);
   const playbackLog = usePlaybackLog();
   const [copyingLog, setCopyingLog] = useState(false);
+
+  /* 导出备份：Rust 侧写剪贴板 + 存文件（Android WebView 默认拒绝
+     navigator.clipboard.writeText，直接写会报 Write permission denied） */
+  const doExport = async () => {
+    const json = JSON.stringify({ app: "hghub", version: APP_VERSION, exported_at: new Date().toISOString(), ...exportBackup() }, null, 2);
+    const fileName = `hghub-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    try {
+      let saved = "";
+      try {
+        saved = await invoke<string>("save_text", { fileName, text: json });
+      } catch { /* 保存失败不阻断 */ }
+      let copied = false;
+      try {
+        copied = await invoke<boolean>("copy_text", { text: json });
+      } catch { /* 剪贴板被拒时靠文件兜底 */ }
+      if (saved) {
+        toast(copied ? `备份已保存并复制到剪贴板\n${saved}` : `备份已保存到\n${saved}`, "ok");
+      } else if (copied) {
+        toast("备份内容已复制到剪贴板", "ok");
+      } else {
+        // 两边都不行的最终兜底：浏览器下载（桌面可用）
+        const blob = new Blob([json], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+        toast("备份文件已生成", "ok");
+      }
+    } catch (e) {
+      toast((e as Error).message || "导出失败", "info");
+    }
+  };
+
+  const pasteOpen = (on: boolean) => {
+    setPasteOpenState(on);
+    if (on) {
+      navigator.clipboard?.readText().then((t) => {
+        if (t && t.includes("\"hghub\"")) setPasteText(t);
+      }).catch(() => {});
+    } else {
+      setPasteText("");
+    }
+  };
 
   const readLine = () => {
     api.lineState().then((s) => setLineBase(s.base)).catch(() => {});
@@ -51,7 +101,9 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
       <div className="shrink-0 relative overflow-hidden bg-s1" style={{ paddingTop: "var(--sat, 0px)" }}>
         <div className="absolute inset-0 pointer-events-none" style={{ background: "radial-gradient(90% 120% at 100% 0%, var(--p-pc) 0%, transparent 60%)", opacity: 0.32 }} />
         <div className="relative px-3 pt-2 pb-4">
-          <button onClick={onBack} aria-label="返回" className="w-10 h-10 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable"><IBack size={20} /></button>
+          <button onClick={onBack} aria-label="返回" className="h-10 pl-2 pr-3.5 rounded-full flex items-center gap-1 text-on bg-s3 pressable">
+            <IBack size={18} /><span className="text-[12.5px] font-semibold">返回</span>
+          </button>
           <div className="px-2 mt-1 flex items-end justify-between">
             <div>
               <div className="flex items-center gap-2">
@@ -86,6 +138,14 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
               </div>
               <Toggle on={muteOnStartup} onChange={setMuteOnStartup} label="启动时静音" />
             </div>
+            <div className="flex items-center gap-3 px-3.5 py-3">
+              <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IBoltF size={16} /></span>
+              <div className="flex-1 min-w-0">
+                <div className="text-[12.5px] text-on">页面预缓存</div>
+                <div className="text-[10.5px] text-mut">首页 / 分类的瀑流页加载完当前页后，后台提前拉好下一页，滑动更顺。流量紧张时可关闭。</div>
+              </div>
+              <Toggle on={prefetchNext} onChange={setPrefetchNext} label="页面预缓存" />
+            </div>
           </Section>
 
           <Section title="本地数据">
@@ -96,6 +156,42 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
                 <div className="text-[10.5px] text-mut">{favs.length} 部收藏 · {history.length} 条观看记录</div>
               </div>
             </div>
+            <button onClick={doExport} className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable">
+              <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><ILink size={16} /></span>
+              <div className="flex-1">
+                <div className="text-[12.5px] text-on">导出备份</div>
+                <div className="text-[10.5px] text-mut">收藏 / 历史 / 偏好存为 JSON 文件，并复制到剪贴板</div>
+              </div>
+              <IChevR size={15} className="text-mut" />
+            </button>
+            <button onClick={() => importInputRef.current?.click()} className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable">
+              <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IRefresh size={16} /></span>
+              <div className="flex-1">
+                <div className="text-[12.5px] text-on">导入备份</div>
+                <div className="text-[10.5px] text-mut">从备份 JSON 文件合并恢复（也可粘贴文本）</div>
+              </div>
+              <IChevR size={15} className="text-mut" />
+            </button>
+            <input ref={importInputRef} type="file" accept=".json,application/json" className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = "";
+                if (!f) return;
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const r = importBackup(String(reader.result || ""));
+                  toast(r.msg, r.ok ? "ok" : "info");
+                };
+                reader.readAsText(f);
+              }} />
+            <button onClick={() => pasteOpen(true)} className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable">
+              <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IInfo size={16} /></span>
+              <div className="flex-1">
+                <div className="text-[12.5px] text-on">粘贴导入</div>
+                <div className="text-[10.5px] text-mut">把备份 JSON 文本粘贴进来恢复</div>
+              </div>
+              <IChevR size={15} className="text-mut" />
+            </button>
             <button onClick={() => setClearOpen(true)} className="w-full flex items-center gap-3 px-3.5 py-3 text-left pressable">
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IBroom size={16} /></span>
               <div className="flex-1">
@@ -141,7 +237,11 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
               try {
                 const text = JSON.stringify(await api.netDiag(), null, 2);
                 logLine(`[net_diag] ${text}`);
-                await navigator.clipboard?.writeText(text);
+                let ok = false;
+                try { ok = await invoke<boolean>("copy_text", { text }); } catch { /* 走兜底 */ }
+                if (!ok) {
+                  await navigator.clipboard?.writeText(text);
+                }
                 toast("网络诊断结果已复制", "ok");
               } catch (e) {
                 toast((e as Error).message || "诊断失败", "info");
@@ -255,7 +355,7 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
         <div className="p-5">
           <div className="text-[14.5px] font-bold text-on">清理缓存</div>
           <p className="text-[12px] text-mut leading-relaxed mt-2">
-            只清除封面与播放列表缓存（解密图 / m3u8）。收藏、观看记录、搜索历史与登录状态都会保留。
+            只清除封面与播放列表缓存（解密图 / m3u8）。收藏、观看记录与搜索历史都会保留。
           </p>
           <div className="flex gap-2 mt-5">
             <button onClick={() => setClearOpen(false)} className="flex-1 h-9 rounded-(--r-ctl) bg-s3 text-[12.5px] text-on/80 pressable">取消</button>
@@ -268,6 +368,24 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
             }} className="flex-1 h-9 rounded-(--r-ctl) bg-primary text-[12.5px] font-semibold text-on-primary pressable disabled:opacity-60">
               {clearing ? "清理中…" : "确定清理"}
             </button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal open={pasteOpenState} onClose={() => pasteOpen(false)} width={392}>
+        <div className="p-5">
+          <div className="text-[14.5px] font-bold text-on">粘贴导入备份</div>
+          <p className="text-[11.5px] text-mut mt-1.5">粘贴「导出备份」生成的 JSON 文本，收藏 / 历史 / 偏好会与本机数据合并。</p>
+          <textarea value={pasteText} onChange={(e) => setPasteText(e.target.value)} rows={6}
+            placeholder='{"app":"hghub", ...}'
+            className="mt-3 w-full rounded-(--r-sm) bg-s2 p-3 text-[11px] text-on font-mono outline-none border border-s3 focus:border-primary resize-none" />
+          <div className="flex gap-2 mt-4">
+            <button onClick={() => pasteOpen(false)} className="flex-1 h-9 rounded-(--r-ctl) bg-s3 text-[12.5px] text-on/80 pressable">取消</button>
+            <button disabled={!pasteText.trim()} onClick={() => {
+              const r = importBackup(pasteText);
+              toast(r.msg, r.ok ? "ok" : "info");
+              if (r.ok) pasteOpen(false);
+            }} className="flex-1 h-9 rounded-(--r-ctl) bg-primary text-[12.5px] font-semibold text-on-primary pressable disabled:opacity-60">导入</button>
           </div>
         </div>
       </Modal>

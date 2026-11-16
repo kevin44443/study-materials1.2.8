@@ -74,6 +74,11 @@ export async function copyPlaybackLog() {
   await flushPlaybackLog();
   const text = await playbackLogApi.read();
   if (!text) throw new Error("尚无诊断日志，请开启后复现问题");
+  // Android WebView 拒绝 JS 写剪贴板，优先走 Rust 命令
+  try {
+    const ok = await invoke<boolean>("copy_text", { text });
+    if (ok) return;
+  } catch { /* 走兜底 */ }
   if (!navigator.clipboard) throw new Error("当前环境无法使用剪贴板，请从日志目录取出 playback.log");
   await navigator.clipboard.writeText(text);
 }

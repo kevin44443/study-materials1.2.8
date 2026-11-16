@@ -35,6 +35,31 @@
 .plat-windows { --r-sm: 4px; --r-md: 8px; --r-lg: 8px; --r-ctl: 4px; --nav-h: 0px; }
 .plat-macos { --r-sm: 6px; --r-md: 10px; --r-lg: 12px; --r-ctl: 6px; --nav-h: 0px; }
 .plat-ios { --r-sm: 10px; --r-md: 14px; --r-lg: 18px; --r-ctl: 999px; -webkit-touch-callout: none; }
+
+/* ===================================================================
+   安卓（小米手机）专属主题 —— 「黄果」暖橙色系 + MIUI 手感
+   更大的圆角、更暖的主色、更明显的按压反馈
+   =================================================================== */
+.plat-android {
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 20px;
+  --r-ctl: 999px;
+  --p-primary: #ff9440;
+  --p-on-primary: #2b1200;
+  --p-pc: #7a4210;
+  --p-on-pc: #ffe3c9;
+  --p-glow: rgba(255, 148, 64, .32);
+  --p-tint: rgba(255, 148, 64, .16);
+}
+html.theme-light .plat-android {
+  --p-primary: #e8641c;
+  --p-on-primary: #ffffff;
+  --p-pc: #ffe0c7;
+  --p-on-pc: #5c2c00;
+  --p-glow: rgba(232, 100, 28, .24);
+  --p-tint: rgba(232, 100, 28, .12);
+}
 html.theme-light {
   color-scheme: light;
   --p-canvas: #f3f3f3;
@@ -485,26 +510,29 @@ input[type="range"].hg-range::-webkit-slider-thumb { -webkit-appearance: none; w
 .player-surface .player-root,
 .player-root { background: #15181d; }
 
-/* —— 移动端沉浸全屏：固定铺满全屏视口，脱离外层滚动容器 scrollTop 影响 —— */
+/* —— 移动端沉浸全屏：固定铺满全屏视口，脱离外层滚动容器 scrollTop 影响 ——
+   注意：这里不再用 position:fixed。安卓 WebView 里 fixed 元素嵌在
+   overflow-scroll + scroll-snap 容器内会出现「整屏黑」的合成层 bug，
+   改为由外层滚动容器在 fs 时整体 fixed，内部只做 absolute 铺满。 */
 .fs-immersive {
-  position: fixed;
+  position: absolute;
   inset: 0;
-  width: 100vw; height: 100vh;
-  width: 100dvw; height: 100dvh;
-  z-index: 45;
   background: #000;
   overflow: hidden;
 }
 
 /* —— 移动端沉浸全屏（系统仍处于竖屏时的 CSS 90° 旋转兜底） —— */
 .fs-landscape {
-  position: fixed;
+  position: absolute;
   top: 50%; left: 50%; right: auto; bottom: auto;
   width: 100vh; height: 100vw;
   width: 100dvh; height: 100dvw;
-  transform: translate(-50%, -50%) rotate(90deg);
+  /* translateZ(0)：安卓 WebView 里旋转后的 video 层需要独立合成层，
+     否则部分机型（MIUI / ColorOS）只渲染出一块黑屏 */
+  transform: translate(-50%, -50%) rotate(90deg) translateZ(0);
   transform-origin: center center;
-  z-index: 45;
+  backface-visibility: hidden;
+  will-change: transform;
   background: #000;
   overflow: hidden;
 }
@@ -556,3 +584,99 @@ html.theme-light .article-body { color: rgba(20,24,30,.82); }
 .hg-tabbar button:focus-visible,
 .hg-player-ui button:focus,
 .hg-player-ui button:focus-visible { outline: none; }
+
+/* ===================================================================
+   皮肤（「我的」里自由更换）：只改强调色与色调，全部走主题变量
+   —— 安卓皮肤变量定义在 .plat-android 上，所以这里必须跟着带同样作用域，
+      否则会被 .plat-android 的默认橙覆盖。
+   =================================================================== */
+html[data-skin="ocean"] {
+  --p-primary: #38bdf8;
+  --p-on-primary: #04202e;
+  --p-pc: #12496b;
+  --p-on-pc: #d4f2ff;
+  --p-glow: rgba(56, 189, 248, .30);
+  --p-tint: rgba(56, 189, 248, .15);
+}
+html[data-skin="ocean"] .plat-android {
+  --p-primary: #38bdf8;
+  --p-on-primary: #04202e;
+  --p-pc: #12496b;
+  --p-on-pc: #d4f2ff;
+  --p-glow: rgba(56, 189, 248, .30);
+  --p-tint: rgba(56, 189, 248, .16);
+}
+
+html[data-skin="violet"] {
+  --p-primary: #a78bfa;
+  --p-on-primary: #1b0b3a;
+  --p-pc: #4b2a86;
+  --p-on-pc: #ede4ff;
+  --p-glow: rgba(167, 139, 250, .32);
+  --p-tint: rgba(167, 139, 250, .16);
+  --p-like: #f472b6;
+}
+html[data-skin="violet"] .plat-android {
+  --p-primary: #a78bfa;
+  --p-on-primary: #1b0b3a;
+  --p-pc: #4b2a86;
+  --p-on-pc: #ede4ff;
+  --p-glow: rgba(167, 139, 250, .32);
+  --p-tint: rgba(167, 139, 250, .17);
+}
+
+html[data-skin="sakura"] {
+  --p-primary: #fb7185;
+  --p-on-primary: #3b0713;
+  --p-pc: #8a2b3e;
+  --p-on-pc: #ffe4ea;
+  --p-glow: rgba(251, 113, 133, .30);
+  --p-tint: rgba(251, 113, 133, .15);
+  --p-star: #f9a8d4;
+}
+html[data-skin="sakura"] .plat-android {
+  --p-primary: #fb7185;
+  --p-on-primary: #3b0713;
+  --p-pc: #8a2b3e;
+  --p-on-pc: #ffe4ea;
+  --p-glow: rgba(251, 113, 133, .30);
+  --p-tint: rgba(251, 113, 133, .16);
+}
+
+html[data-skin="forest"] {
+  --p-primary: #34d399;
+  --p-on-primary: #04271b;
+  --p-pc: #11543c;
+  --p-on-pc: #d4ffef;
+  --p-glow: rgba(52, 211, 153, .30);
+  --p-tint: rgba(52, 211, 153, .15);
+}
+html[data-skin="forest"] .plat-android {
+  --p-primary: #34d399;
+  --p-on-primary: #04271b;
+  --p-pc: #11543c;
+  --p-on-pc: #d4ffef;
+  --p-glow: rgba(52, 211, 153, .30);
+  --p-tint: rgba(52, 211, 153, .16);
+}
+
+/* 浅色主题下主色要压暗，保证白底上的文字/图标对比度 */
+html.theme-light[data-skin="ocean"] { --p-primary: #0284c7; --p-on-primary: #ffffff; --p-pc: #cce9f8; --p-on-pc: #04364d; --p-glow: rgba(2,132,199,.2); --p-tint: rgba(2,132,199,.12); }
+html.theme-light[data-skin="violet"] { --p-primary: #7c3aed; --p-on-primary: #ffffff; --p-pc: #e6dbff; --p-on-pc: #2c1060; --p-glow: rgba(124,58,237,.2); --p-tint: rgba(124,58,237,.12); }
+html.theme-light[data-skin="sakura"] { --p-primary: #e11d48; --p-on-primary: #ffffff; --p-pc: #ffe0e6; --p-on-pc: #5b0a1b; --p-glow: rgba(225,29,72,.18); --p-tint: rgba(225,29,72,.1); }
+html.theme-light[data-skin="forest"] { --p-primary: #0f9d63; --p-on-primary: #ffffff; --p-pc: #d3f6e7; --p-on-pc: #05402c; --p-glow: rgba(15,157,99,.18); --p-tint: rgba(15,157,99,.1); }
+html.theme-light[data-skin="ocean"] .plat-android { --p-primary: #0284c7; --p-on-primary: #ffffff; --p-pc: #cce9f8; --p-on-pc: #04364d; }
+html.theme-light[data-skin="violet"] .plat-android { --p-primary: #7c3aed; --p-on-primary: #ffffff; --p-pc: #e6dbff; --p-on-pc: #2c1060; }
+html.theme-light[data-skin="sakura"] .plat-android { --p-primary: #e11d48; --p-on-primary: #ffffff; --p-pc: #ffe0e6; --p-on-pc: #5b0a1b; }
+html.theme-light[data-skin="forest"] .plat-android { --p-primary: #0f9d63; --p-on-primary: #ffffff; --p-pc: #d3f6e7; --p-on-pc: #05402c; }
+
+/* 全屏舞台：外层滚动容器在 fs 时变成 fixed 铺满，内部只用 absolute */
+.fs-stage {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  background: #000;
+  overflow: hidden;
+  width: 100dvw;
+  height: 100dvh;
+}

@@ -1,4 +1,5 @@
 mod api;
+mod downloads;
 mod lines;
 mod logging;
 #[cfg(target_os = "macos")]
@@ -51,6 +52,7 @@ pub fn run() {
                 .open_js_links_on_click(false)
                 .build(),
         )
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Api::new())
         .setup(|app| {
             if let Ok(dir) = app.path().app_data_dir() {
@@ -58,6 +60,7 @@ pub fn run() {
                 // 上次选择的线路（设置 → 线路）在启动时恢复
                 net::bind_base(&dir);
                 playback_log::bind(&dir);
+                downloads::bind(&dir);
                 let state: tauri::State<Api> = app.state();
                 state.session.bind(dir);
             }
@@ -113,7 +116,12 @@ pub fn run() {
             // （Windows/Android 是 http://<scheme>.localhost，macOS/iOS/Linux 是 <scheme>://localhost）。
             // 它同时是 m3u8 分片/key 改写用的前缀，必须与前端 src/api.ts 的 LOCAL 一致。
             tauri::async_runtime::spawn(async move {
-                let mut resp = media::handle(&path, &query, media::LOCAL_ORIGIN).await;
+                // /file?k= ：离线缓存（缓冲下载）的本地文件，不走远程代理
+                let mut resp = if path == "/file" {
+                    downloads::serve_file(&query)
+                } else {
+                    media::handle(&path, &query, media::LOCAL_ORIGIN).await
+                };
                 if let Some(origin) =
                     request_origin.and_then(|s| tauri::http::HeaderValue::from_str(&s).ok())
                 {
@@ -167,6 +175,17 @@ pub fn run() {
             api::api_like,
             api::api_collect,
             api::api_follow,
+            downloads::dl_start,
+            downloads::dl_enqueue,
+            downloads::dl_get,
+            downloads::dl_list,
+            downloads::dl_cancel,
+            downloads::dl_pause,
+            downloads::dl_resume,
+            downloads::dl_remove,
+            downloads::dl_clear,
+            downloads::save_text,
+            downloads::copy_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

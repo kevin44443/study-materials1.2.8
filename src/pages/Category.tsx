@@ -58,16 +58,21 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
     void loadPreview("posts");
   }, [active, loadPreview]);
 
+  /* 上游 410 = 频道内容被官方下线，隐藏该板块（重试无意义） */
+  const offline = (key: string) => (errors[key] || "").includes("已下线");
+  const liveChannels = CHANNELS.filter(c => !offline(c.cate));
+  const channelCount = liveChannels.length + (offline("posts") ? 0 : 1);
+
   return (
     <div className="absolute inset-0 bg-bg flex flex-col">
       <div className="shrink-0 px-4 pb-1" style={{ paddingTop: "calc(var(--sat, 0px) + 14px)" }}>
         <div className="flex items-end gap-2.5">
           <span className="text-[24px] font-bold text-on leading-none">分类</span>
-          <span className="text-[11px] text-mut pb-0.5">{CHANNELS.length + 1} 个频道 · 每周持续上新</span>
+          <span className="text-[11px] text-mut pb-0.5">{channelCount} 个频道 · 每周持续上新</span>
         </div>
       </div>
 
-      <div className="flex-1 scroll-y pb-24 pt-2">
+      <div className="flex-1 scroll-y pb-28 pt-2">
         {/* 排行榜入口 */}
         <button onClick={() => push({ kind: "ranks" })}
           className="mx-4 mb-5 w-[calc(100%-2rem)] flex items-center gap-3 rounded-(--r-md) bg-s2 p-3.5 text-left pressable elev-1">
@@ -79,7 +84,7 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
           <IChevR size={16} className="text-mut" />
         </button>
 
-        {CHANNELS.map((c, ci) => {
+        {liveChannels.map((c, ci) => {
           const list = rows[c.cate] || [];
           return (
             <section key={c.cate} aria-label={c.name} className="mb-5 a-rise" style={{ animationDelay: `${Math.min(ci * 50, 300)}ms` }}>
@@ -106,7 +111,8 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
           );
         })}
 
-        {/* 吃瓜 */}
+        {/* 吃瓜（上游下线时隐藏板块） */}
+        {!offline("posts") && (
         <section aria-label="黄果吃瓜" className="mb-5 a-rise">
           <button onClick={() => push({ kind: "posts" })}
             className="w-full flex items-center gap-2.5 px-4 mb-2.5 text-left pressable group">
@@ -136,6 +142,7 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
             {!posts.length && <PreviewStatus name="黄果吃瓜" loading={loading.posts !== false} error={errors.posts} onRetry={() => void loadPreview("posts")} />}
           </div>
         </section>
+        )}
 
         <div className="px-4 text-center text-[10.5px] text-dim pt-1">— 已展示全部频道 —</div>
       </div>
@@ -153,7 +160,7 @@ function PreviewStatus({ name, loading, error, onRetry }: { name: string; loadin
 
 /* ================= 频道详情页 ================= */
 export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: string; onBack: () => void; wide: boolean }) {
-  const { push } = useStore();
+  const { push, prefetchNext } = useStore();
   const [sort, setSort] = useState<"最新" | "最热" | "高分">("最新");
   const [items, setItems] = useState<VideoCard[]>([]);
   const [page, setPage] = useState(0);
@@ -162,13 +169,26 @@ export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: 
   const [err, setErr] = useState<string | null>(null);
   const busy = useRef(false);
   const sentinel = useRef<HTMLDivElement>(null);
+  /* 预缓存下一页，滚到底直接续上 */
+  const cache = useRef<Record<number, VideoCard[]>>({});
+  const prefetching = useRef<Set<number>>(new Set());
 
   const loadMore = async () => {
     if (busy.current || page >= pages) return;
+    const next = page + 1;
+    const hit = cache.current[next];
+    if (hit?.length) {
+      delete cache.current[next];
+      setItems((prev) => {
+        const seen = new Set(prev.map((x) => x.id));
+        return [...prev, ...hit.filter((x) => !seen.has(x.id))];
+      });
+      setPage(next);
+      return;
+    }
     busy.current = true;
     setLoading(true);
     try {
-      const next = page + 1;
       const res = await api.category(cate, next, 20);
       setItems((prev) => {
         const seen = new Set(prev.map((x) => x.id));
@@ -184,6 +204,19 @@ export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: 
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!prefetchNext || !page || page >= pages) return;
+    const next = page + 1;
+    if (cache.current[next] || prefetching.current.has(next)) return;
+    prefetching.current.add(next);
+    let alive = true;
+    api.category(cate, next, 20)
+      .then((res) => { if (alive && res?.items?.length) cache.current[next] = res.items; })
+      .catch(() => {})
+      .finally(() => { prefetching.current.delete(next); });
+    return () => { alive = false; };
+  }, [page, pages, prefetchNext, cate]);
 
   useEffect(() => { loadMore(); /* eslint-disable-next-line */ }, []);
   useEffect(() => {
@@ -205,7 +238,9 @@ export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: 
     <div className="absolute inset-0 bg-bg flex flex-col">
       <div className="shrink-0 bg-s1" style={{ paddingTop: "var(--sat, 0px)" }}>
         <div className="px-3 pt-2 pb-3 flex items-center gap-2.5">
-          <button onClick={onBack} className="w-10 h-10 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable"><IBack size={20} /></button>
+          <button onClick={onBack} className="h-10 pl-2 pr-3 rounded-full flex items-center gap-1 text-on bg-s3 pressable">
+            <IBack size={18} /><span className="text-[12.5px] font-semibold">返回</span>
+          </button>
           <span className="w-[40px] h-[40px] rounded-(--r-sm) bg-pc text-on-pc flex items-center justify-center"><IGrid size={21} strokeWidth={1.9} /></span>
           <div className="flex-1 min-w-0">
             <div className="text-[17px] font-bold text-on leading-tight">{name}</div>

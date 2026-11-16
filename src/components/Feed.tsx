@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { api, cover, fmt, fmtTime, isMobile } from "../api";
+import { listen } from "@tauri-apps/api/event";
+import { api, cover, fmt, fmtTime, isMobile, LOCAL } from "../api";
 import type { Detail, Episode, Post, VideoCard } from "../types";
 import { useStore } from "../store";
 import { Avatar, Img, Sheet } from "./ui";
@@ -9,10 +10,14 @@ import PlayerControls from "./PlayerControls";
 import PlaybackLock from "./PlaybackLock";
 import { ArticlePanel, CommentsPanel, EpisodesPanel } from "./Panels";
 import { setBackHandler } from "../back";
+import { enqueueEpisodes } from "../downloader";
 import {
   IBack, IBoltF, IChevR, IChevronDown, IChevronUp, IClose, ICommentF, ICompress, IExpand, IFileText, IHeart, IHeartF,
-  ILink, IList, ILockF, IPauseF, IPlayF, ISearch, IStar, IStarF, IVol, IVolMute,
+  IInfo, ILink, IList, ILockF, IPauseF, IPlayF, ISearch, IStar, IStarF, IVol, IVolMute,
 } from "../icons";
+
+/** 预设倍速档位（含 3x / 4x），倍速面板里另有 0.25-6 自定义 */
+const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
 
 type Props = {
   videoIds: number[];
@@ -31,7 +36,7 @@ type Props = {
 
 export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind = "video", active, bottomInset, onBack, onNearEnd, startEp, startTime }: Props) {
   const store = useStore();
-  const { isLiked, isFav, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, muted, setMuted, volume, setVolume, toast, addHistory, user, setLoginOpen } = store;
+  const { isLiked, isFav, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, muted, setMuted, volume, setVolume, toast, addHistory } = store;
   const isDesktop = !isMobile;
 
   const boxRef = useRef<HTMLDivElement>(null);
@@ -70,6 +75,26 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   const clean = store.clean;
   const setClean = store.setClean;
 
+  /* 全屏：手指触碰屏幕呼出「顶部剧名/集数/总进度 + 底部控制条」，3.2 秒后自动隐藏 */
+  const [fsUi, setFsUi] = useState(false);
+  const fsUiTimer = useRef<number | null>(null);
+  const showFsUi = useCallback(() => {
+    setFsUi(true);
+    if (fsUiTimer.current) window.clearTimeout(fsUiTimer.current);
+    fsUiTimer.current = window.setTimeout(() => {
+      fsUiTimer.current = null;
+      setFsUi(false);
+    }, 3200);
+  }, []);
+  useEffect(() => {
+    if (fs) showFsUi();
+    else {
+      setFsUi(false);
+      if (fsUiTimer.current) { window.clearTimeout(fsUiTimer.current); fsUiTimer.current = null; }
+    }
+  }, [fs, showFsUi]);
+  useEffect(() => () => { if (fsUiTimer.current) window.clearTimeout(fsUiTimer.current); }, []);
+
   /* 追踪手机视口是否已处于物理/系统横屏状态（window.innerWidth > window.innerHeight） */
   const [vpLandscape, setVpLandscape] = useState(
     () => typeof window !== "undefined" && window.innerWidth > window.innerHeight,
@@ -105,6 +130,49 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   /* —— 移动端手势 & 竖屏横片缩放 —— */
   const [holdSpeed, setHoldSpeed] = useState(false);
   const [speedLock, setSpeedLock] = useState(false);
+  /* 倍速面板：预设含 3x/4x，另支持 0.25-6 自定义 */
+  const [speedPanel, setSpeedPanel] = useState(false);
+  const [customRateOpen, setCustomRateOpen] = useState(false);
+  const [customRateVal, setCustomRateVal] = useState("");
+  /* 倍速悬浮球：按住上下滑动调倍率（每 80px ≈ 1x，0.25-6）；
+     长按 420ms 进入「拖动摆放」模式，可拖到左手拇指顺手的位置，位置本地持久化 */
+  const [rateDrag, setRateDrag] = useState<{ y0: number; base: number; cur: number } | null>(null);
+  const RATE_PER_PX = 1 / 80;
+  /* v2：默认位置改到「左下四分之一」处，旧版本记住的中间位置一次作废 */
+  const RATE_POS_KEY = "hghub.rateBall.pos.v2";
+  const defaultRatePos = () => ({
+    x: 6,
+    y: Math.round((window.innerHeight || 640) * 0.72),
+  });
+  const [ratePos, setRatePos] = useState<{ x: number; y: number }>(() => {
+    try {
+      const raw = localStorage.getItem("hghub.rateBall.pos.v2");
+      if (raw) {
+        const p = JSON.parse(raw) as { x?: number; y?: number };
+        if (typeof p?.x === "number" && typeof p?.y === "number") return { x: p.x, y: p.y };
+      }
+    } catch { /* ignore */ }
+    return defaultRatePos();
+  });
+  const [rateMoving, setRateMoving] = useState(false);
+  /* 长条倍速条：手指触碰显示，松手 3 秒后自动隐藏；拖动摆放/调速期间常显 */
+  const [rateShown, setRateShown] = useState(false);
+  const rateHideTimer = useRef<number | null>(null);
+  const showRateBar = useCallback(() => {
+    if (rateHideTimer.current) { window.clearTimeout(rateHideTimer.current); rateHideTimer.current = null; }
+    setRateShown(true);
+  }, []);
+  const scheduleHideRateBar = useCallback(() => {
+    if (rateHideTimer.current) window.clearTimeout(rateHideTimer.current);
+    rateHideTimer.current = window.setTimeout(() => {
+      rateHideTimer.current = null;
+      setRateShown(false);
+    }, 3000);
+  }, []);
+  useEffect(() => () => { if (rateHideTimer.current) window.clearTimeout(rateHideTimer.current); }, []);
+  const rateGesture = useRef<{
+    x0: number; y0: number; baseRate: number; posX: number; posY: number; timer: number | null; moved: boolean;
+  } | null>(null);
   const [lockArmed, setLockArmed] = useState(false);
   const holdRef = useRef(false);
   const lockArmedRef = useRef(false);
@@ -139,6 +207,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     if (!barScrub.current && gesture.current?.mode !== "scrub") {
       setTime(t);
     }
+    /* 播到一半：静默预缓存下一集（只缓存，不算「下载」） */
+    if (duration > 0 && t >= duration * 0.5) void prefetchNextEp(curId, curEp);
     const now = Date.now();
     if (duration > 0 && now - lastSaveRef.current > 5000) {
       lastSaveRef.current = now;
@@ -360,19 +430,58 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kind, index, videoIds]);
 
-  /* 拉播放地址 */
+  /* 拉播放地址：先查离线缓存（下载过的直接本地播），否则走上游。
+     不再自动整集下载；播放过半时只静默预缓存「下一集」，减少切集等待。 */
+  const episodesRef = useRef(episodes);
+  episodesRef.current = episodes;
+  const detailRef = useRef(detail);
+  detailRef.current = detail;
+  /* 已触发过预缓存的集，避免 timeupdate 高频重复调用 */
+  const prefetchRef = useRef<Set<string>>(new Set());
+  const prefetchNextEp = useCallback(async (vid: number, ep: number) => {
+    const key = `${vid}:${ep + 1}`;
+    if (prefetchRef.current.has(key)) return;
+    if (!episodesRef.current.some((e) => e.ep_num === ep + 1)) return;
+    prefetchRef.current.add(key);
+    try {
+      const st = await invoke<{ done?: boolean; meta?: { status?: string } }>("dl_get", { videoId: vid, ep: ep + 1 });
+      const s = st?.meta?.status;
+      if (st?.done || s === "downloading" || s === "queued" || s === "paused") return;
+      const info = await api.play(vid, ep + 1);
+      if (!info?.video_url) return;
+      // auto=true：只做播放缓存，不在「离线视频」里作为下载展示
+      void invoke("dl_start", {
+        videoId: vid, ep: ep + 1, url: info.video_url,
+        title: detailRef.current?.title || "", auto: true,
+        cover: detailRef.current?.cover || "",
+      }).catch(() => {});
+    } catch { /* 预缓存失败不影响播放 */ }
+  }, []);
   useEffect(() => {
     if (!curId) return;
     if (playUrls[playKey]) return;
     let alive = true;
-    api.play(curId, curEp)
-      .then((info) => {
+    invoke("dl_get", { videoId: curId, ep: curEp })
+      .then((r) => {
+        const hit = r && (r as { done?: boolean; key?: string }).done && (r as { key?: string }).key;
         if (!alive) return;
-        if (!info?.video_url) throw new Error("暂无播放地址");
-        setPlayUrls((m) => ({ ...m, [playKey]: info.video_url }));
-        addHistory(curId, curEp);
+        if (hit) {
+          setPlayUrls((m) => ({ ...m, [playKey]: `${LOCAL}/file?k=${(r as { key: string }).key}/index.m3u8` }));
+          addHistory(curId, curEp);
+          return;
+        }
+        throw new Error("miss");
       })
-      .catch((e) => { if (alive) setErr((e as Error).message || "取播放地址失败"); });
+      .catch(() => {
+        api.play(curId, curEp)
+          .then((info) => {
+            if (!alive) return;
+            if (!info?.video_url) throw new Error("暂无播放地址");
+            setPlayUrls((m) => ({ ...m, [playKey]: info.video_url }));
+            addHistory(curId, curEp);
+          })
+          .catch((e) => { if (alive) setErr((e as Error).message || "取播放地址失败"); });
+      });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [curId, curEp, playTry]);
@@ -395,6 +504,17 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fs]);
+
+  /* 全屏黑屏兜底：切到全屏后若视频层迟迟没有出帧（readyState < 2），
+     说明渲染/解码在视口变化时被挂起了，主动重新起播一次。 */
+  useEffect(() => {
+    if (!fs) return undefined;
+    const t = window.setTimeout(() => {
+      const v = videoRef.current?.el();
+      if (v && v.readyState < 2) videoRef.current?.reload();
+    }, 800);
+    return () => window.clearTimeout(t);
   }, [fs]);
 
   /* 音量/静音同步 */
@@ -532,6 +652,10 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
   /* —— 长按 2x（上滑锁定） / 横拖定位 / 单击清屏 / 双击暂停 —— */
   const onDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (isDesktop || controlsLocked || !active || !e.isPrimary || pinchRef.current || gesture.current || e.button !== 0) return;
+    /* 手指触碰画面即呼出倍速条，松手 3 秒后自动隐藏 */
+    if (!rateMoving && !rateDrag) showRateBar();
+    /* 全屏时触碰即呼出顶部剧名/集数/总进度与控制条 */
+    if (fs) showFsUi();
     const el = e.currentTarget;
     const span = rotated ? (el.clientHeight || window.innerHeight || 1) : (el.clientWidth || 1);
     try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
@@ -606,6 +730,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     gesture.current = null;
     if (!g) return;
     if (g.timer) window.clearTimeout(g.timer);
+    /* 手指离开画面：倍速条 3 秒后自动隐藏 */
+    scheduleHideRateBar();
 
     if (g.mode === "hold") {
       holdRef.current = false;
@@ -641,12 +767,16 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
         lastTapRef.current.time = 0;
         videoRef.current?.toggle();
       } else {
-        // 单击屏幕：切换清屏模式（消除或恢复所有界面控件，只显示视频内容）
+        // 单击屏幕：全屏时呼出顶部信息/控制条；非全屏切换清屏模式
         lastTapRef.current.time = now;
         clearTapTimer();
         lastTapRef.current.timer = window.setTimeout(() => {
           lastTapRef.current.timer = null;
-          setClean((c) => !c);
+          if (fs) {
+            showFsUi();
+          } else {
+            setClean((c) => !c);
+          }
         }, 250) as unknown as number;
       }
     }
@@ -733,21 +863,19 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     } catch { toast("画中画开启失败", "info"); }
   };
 
-  const requireLogin = () => { if (!user) { setLoginOpen(true); return false; } return true; };
+  /* 已移除账号体系：点赞 / 收藏 / 关注全部只存本地 */
 
   const onLike = () => {
     if (!curId) return;
     const on = toggleLikeLocal(curId);
     setHeartBurst((n) => n + 1);
     toast(on ? "已加入喜欢" : "已取消喜欢", on ? "heart" : "info");
-    if (requireLogin()) { if (kind === "post") api.postLike(curId, on).catch(() => {}); else api.like(curId, curEp, on).catch(() => {}); }
   };
 
   const onFav = () => {
     if (!curId) return;
     const on = toggleFavLocal(curId);
     toast(on ? "已收藏" : "已取消收藏", on ? "star" : "info");
-    if (requireLogin()) { if (kind === "post") api.postCollect(curId, on).catch(() => {}); else api.collect(curId, on).catch(() => {}); }
   };
 
   const onFollow = () => {
@@ -755,12 +883,146 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
     if (!uid) return;
     const on = toggleFollowLocal(uid);
     toast(on ? `已关注 ${detail?.author?.name}` : "已取消关注", on ? "ok" : "info");
-    if (requireLogin()) api.follow(uid, on).catch(() => {});
+  };
+
+  /* —— 缓冲下载：进度监听 + 一键下载全部剧集 —— */
+  type DlItem = { done: number; total: number; status: string };
+  const [dlState, setDlState] = useState<Record<string, DlItem>>({});
+  const [dlAllRunning, setDlAllRunning] = useState(false);
+  useEffect(() => {
+    if (!active) return;
+    let off: (() => void) | null = null;
+    listen<DlItem & { key?: string; video_id?: number; ep?: number; auto?: boolean }>("dl-progress", (e) => {
+      const p = e.payload;
+      /* 自动预缓存的进度不算「下载」，不在选集的集数上显示角标 */
+      if (p.auto) return;
+      const key = p.key ?? (p.video_id && p.ep ? `${p.video_id}:${p.ep}` : "");
+      if (!key) return;
+      setDlState((m) => ({ ...m, [key.replace("_", ":")]: { done: p.done || 0, total: p.total || 0, status: p.status } }));
+    })
+      .then((fn) => { off = () => { void fn(); }; })
+      .catch(() => {});
+    return () => { off?.(); };
+  }, [active]);
+
+  /* —— 勾选下载：取好地址后整体入队（后台顺序下载，不阻塞界面） —— */
+  const downloadSelected = async (eps: number[]) => {
+    if (!eps.length || kind !== "video") return;
+    setDlAllRunning(true);
+    try {
+      const r = await enqueueEpisodes(curId, meta.title || title, eps, meta.cover || "");
+      toast(r.queued ? `已加入下载队列 ${r.queued} 集${r.skipped ? ` · 跳过 ${r.skipped} 集` : ""}` : "所选剧集已下载过", "ok");
+    } catch (e) {
+      toast((e as Error).message || "下载失败", "info");
+    } finally {
+      setDlAllRunning(false);
+    }
+  };
+
+  const downloadAll = () => downloadSelected(episodes.map((e) => e.ep_num));
+  const pauseEp = (ep: number) => {
+    void invoke("dl_pause", { videoId: curId, ep }).catch(() => {});
+    setDlState((m) => ({ ...m, [`${curId}:${ep}`]: { ...(m[`${curId}:${ep}`] || { done: 0, total: 0 }), status: "paused" } }));
+    toast(`第 ${ep} 集已暂停`, "info");
+  };
+  const resumeEp = (ep: number) => {
+    void invoke("dl_resume", { videoId: curId, ep }).catch(() => {});
+    setDlState((m) => ({ ...m, [`${curId}:${ep}`]: { ...(m[`${curId}:${ep}`] || { done: 0, total: 0 }), status: "downloading" } }));
+    toast(`第 ${ep} 集继续下载`, "ok");
   };
 
   const pickEp = (ep: number) => {
     setEpMap((m) => ({ ...m, [curId]: ep }));
     setPanel(null);
+  };
+
+  /* —— 悬浮倍速条手势：短滑调速 / 长按拖动摆放 —— */
+  const clampRatePos = (x: number, y: number) => {
+    const w = window.innerWidth || 360;
+    const h = window.innerHeight || 640;
+    const bw = 64;
+    const bh = 116;
+    return {
+      x: Math.max(4, Math.min(w - bw - 4, x)),
+      y: Math.max(64, Math.min(h - bh - 140, y)),
+    };
+  };
+
+  /* 记下的位置在转屏/换机后可能越界：渲染时按当前视口实时收拢，不改动已保存的值 */
+  const shownRatePos = ratePos ? clampRatePos(ratePos.x, ratePos.y) : null;
+
+  const onRatePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (rateMoving) return;
+    e.preventDefault();
+    e.stopPropagation();
+    showRateBar();
+    const el = e.currentTarget as HTMLElement;
+    try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    const r = el.getBoundingClientRect();
+    const pos = shownRatePos ?? { x: r.left, y: r.top };
+    rateGesture.current = {
+      x0: e.clientX, y0: e.clientY, baseRate: rate, posX: pos.x, posY: pos.y, moved: false,
+      timer: window.setTimeout(() => {
+        const g = rateGesture.current;
+        if (!g || g.moved) return;
+        g.timer = null;
+        setRateDrag(null);
+        setRatePos({ x: g.posX, y: g.posY });
+        setRateMoving(true);
+        try { navigator.vibrate?.(30); } catch { /* ignore */ }
+      }, 420) as unknown as number,
+    };
+  };
+
+  const onRatePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const g = rateGesture.current;
+    if (!g) return;
+    e.stopPropagation();
+    const dx = e.clientX - g.x0;
+    const dy = e.clientY - g.y0;
+
+    /* 拖动摆放中：直接跟手移动（不调速） */
+    if (rateMoving) {
+      setRatePos(clampRatePos(g.posX + dx, g.posY + dy));
+      return;
+    }
+
+    /* 先动起来就取消长按计时，转为调速手势 */
+    if (!g.moved && Math.hypot(dx, dy) > 8) {
+      g.moved = true;
+      if (g.timer) { window.clearTimeout(g.timer); g.timer = null; }
+    }
+    if (!g.moved) return;
+    const next = Math.min(6, Math.max(0.25, Math.round((g.baseRate - dy * RATE_PER_PX) * 100) / 100));
+    setRateDrag((prev) => (prev && prev.cur === next ? prev : { y0: g.y0, base: g.baseRate, cur: next }));
+  };
+
+  const onRatePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const g = rateGesture.current;
+    rateGesture.current = null;
+    if (g?.timer) window.clearTimeout(g.timer);
+    if (!g) return;
+    e.stopPropagation();
+
+    if (rateMoving) {
+      setRateMoving(false);
+      setRatePos((p) => {
+        if (p) { try { localStorage.setItem(RATE_POS_KEY, JSON.stringify(p)); } catch { /* ignore */ } }
+        return p;
+      });
+      toast("倍速按钮位置已保存", "ok");
+      scheduleHideRateBar();
+      return;
+    }
+
+    const cur = rateDrag?.cur;
+    setRateDrag(null);
+    if (cur != null && cur !== g.baseRate) {
+      setRate(cur);
+      videoRef.current?.rate(cur);
+      toast(`倍速已调至 ${cur}x`, "info");
+    }
+    scheduleHideRateBar();
   };
 
   const likeCount = useMemo(() => {
@@ -791,8 +1053,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       )}
 
       <div ref={boxRef} onScroll={onScroll}
-        className={`absolute inset-y-0 left-0 no-bar ${fs ? "overflow-hidden" : "overflow-y-scroll snap-y snap-mandatory overscroll-y-contain"}`}
-        style={{ right: isDesktop && panel ? 372 : 0, transition: "right .3s cubic-bezier(.2,0,0,1)" }}>
+        className={fs ? "fs-stage no-bar" : "absolute inset-y-0 left-0 no-bar overflow-y-scroll snap-y snap-mandatory overscroll-y-contain"}
+        style={{ right: fs ? 0 : (isDesktop && panel ? 372 : 0), transition: "right .3s cubic-bezier(.2,0,0,1)" }}>
         {videoIds.map((vid, i) => {
           const isActive = i === index;
           return (
@@ -841,7 +1103,50 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                     />
                   </div>
 
-                  {/* 横拖定位浮层 */}
+                  {/* 悬浮倍速条（磨砂长条）：手指触碰显示、松手 3 秒自动隐藏；
+                      按住上下滑动调速，长按可拖动摆放（位置本地记住） */}
+                  {!isDesktop && !clean && !controlsLocked && (rateShown || rateMoving || rateDrag || rate !== 1) && (
+                    <div
+                      className="absolute z-40 select-none"
+                      style={{
+                        left: shownRatePos ? shownRatePos.x : 6,
+                        top: shownRatePos ? shownRatePos.y : Math.round((window.innerHeight || 640) * 0.72),
+                        touchAction: "none",
+                      }}
+                      onPointerDown={onRatePointerDown}
+                      onPointerMove={onRatePointerMove}
+                      onPointerUp={onRatePointerUp}
+                      onPointerCancel={onRatePointerUp}>
+                      <div className="relative">
+                        <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 whitespace-nowrap">
+                          {rateMoving ? (
+                            <div className="hg-chip-strong backdrop-blur-md px-2.5 py-1 rounded-full text-[10.5px] font-bold elev-2 hg-ink-2">
+                              拖动摆放 · 松手保存
+                            </div>
+                          ) : rateDrag ? (
+                            <div className="hg-chip-strong backdrop-blur-md px-3 py-1.5 rounded-full text-[15px] font-bold tabular-nums elev-2 hg-ink-2">
+                              {rateDrag.cur}x
+                            </div>
+                          ) : null}
+                        </div>
+                        <div
+                          aria-label="倍速调节（上下滑动调速，长按拖动）"
+                          className={`w-16 h-[116px] rounded-[26px] flex flex-col items-center justify-center gap-1 elev-2 transition-colors ${rateMoving ? "ring-2 ring-primary" : ""}`}
+                          style={{
+                            background: rateMoving ? "rgba(0,0,0,.42)" : "rgba(255,255,255,.14)",
+                            backdropFilter: "blur(22px) saturate(1.4)",
+                            WebkitBackdropFilter: "blur(22px) saturate(1.4)",
+                            boxShadow: "inset 0 0 0 1px rgba(255,255,255,.22), 0 8px 24px rgba(0,0,0,.3)",
+                          }}>
+                          <IBoltF size={20} className={rate !== 1 || rateMoving ? "text-primary" : "hg-ink-2"} />
+                          <span className={`text-[26px] leading-none font-black tabular-nums ${rate !== 1 || rateMoving ? "text-primary" : "hg-ink"}`}>
+                            {rateDrag ? rateDrag.cur : rate}
+                          </span>
+                          <span className="text-[10.5px] font-semibold hg-ink-3">{rateMoving ? "拖动" : "倍速"}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   {!isDesktop && scrub && (
                     <div className="absolute inset-0 z-30 flex flex-col items-center justify-center pointer-events-none" style={{ background: "rgba(0,0,0,.25)" }}>
                       <span className="text-[26px] font-bold hg-ink tabular-nums hg-ov-shadow">{fmtTime(scrub.target)}</span>
@@ -877,8 +1182,8 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                     </div>
                   )}
 
-                  {/* 移动端：倍速状态 / 锁定提示 */}
-                  {!isDesktop && (!clean || holdSpeed) && (holdSpeed || speedLock || rate !== 1) && (
+                  {/* 移动端：倍速状态 / 锁定提示（全屏时让位给顶部信息条） */}
+                  {!isDesktop && !fs && (!clean || holdSpeed) && (holdSpeed || speedLock || rate !== 1) && (
                     <button
                       onClick={() => {
                         if (speedLock) { setSpeedLock(false); toast("已解除倍速锁定", "info"); }
@@ -899,20 +1204,38 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                     </div>
                   )}
 
-                  {/* 移动端：沉浸全屏控制栏（清屏 clean 模式下隐藏，单击屏幕可呼出/隐藏） */}
-                  {!isDesktop && fs && !clean && !controlsLocked && (
-                    <>
-                      <div className="absolute right-4 z-40 flex items-center gap-2"
-                        style={{ top: rotated || vpLandscape ? 14 : "calc(var(--sat, 0px) + 8px)" }}>
+                  {/* 移动端：沉浸全屏顶部信息（触摸画面呼出，3.2s 自动隐藏） */}
+                  {!isDesktop && fs && !clean && !controlsLocked && fsUi && (
+                    <div className="absolute inset-x-0 top-0 z-40 px-4 pb-3 pointer-events-none"
+                      style={{
+                        paddingTop: rotated || vpLandscape ? 12 : "calc(var(--sat, 0px) + 10px)",
+                        background: "linear-gradient(180deg, rgba(0,0,0,.78) 0%, rgba(0,0,0,.35) 62%, transparent 100%)",
+                      }}>
+                      <div className="flex items-start gap-2.5">
+                        <div className="min-w-0 flex-1">
+                          <div className="text-[13.5px] font-semibold hg-ink truncate hg-ov-shadow">
+                            {meta.title || title || "播放中"}
+                          </div>
+                          <div className="mt-0.5 text-[10.5px] hg-ink-3 tabular-nums hg-ov-shadow">
+                            第 {curEp}{episodes.length ? ` / ${episodes.length}` : ""} 集
+                            {duration > 0 ? ` · ${fmtTime(time)} / ${fmtTime(duration)}` : ""}
+                          </div>
+                        </div>
                         <button onClick={lockControls} aria-label="锁定播放控制" title="锁定播放控制" aria-pressed={false}
-                          className="hg-chip-strong w-9 h-9 rounded-full backdrop-blur-md flex items-center justify-center pressable elev-1">
-                          <ILockF size={17} />
-                        </button>
-                        <button onClick={exitFs} aria-label="退出全屏"
-                          className="hg-chip-strong w-9 h-9 rounded-full backdrop-blur-md flex items-center justify-center pressable elev-1">
-                          <ICompress size={18} />
+                          className="hg-chip-strong h-8 pl-2 pr-2.5 rounded-full backdrop-blur-md flex items-center gap-1 pressable elev-1 pointer-events-auto shrink-0">
+                          <ILockF size={15} /><span className="text-[11px] font-semibold hg-ink">锁定</span>
                         </button>
                       </div>
+                      {/* 总进度线 */}
+                      <div className="mt-2.5 h-[3px] rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,.22)" }}>
+                        <div className="h-full rounded-full bg-white" style={{ width: `${Math.max(0, Math.min(100, barProgress * 100))}%`, transition: barPct !== null ? "none" : "width .25s linear" }} />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 移动端：沉浸全屏控制栏（清屏 clean 模式下隐藏，触摸画面呼出，3.2s 自动收起） */}
+                  {!isDesktop && fs && !clean && !controlsLocked && fsUi && (
+                    <>
                       {zoom.scale > 1.05 && (
                         <button
                           onClick={() => setZoom({ scale: 1, x: 0, y: 0, gesturing: false })}
@@ -921,6 +1244,12 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                           还原画面 ({zoom.scale.toFixed(1)}x)
                         </button>
                       )}
+                      {/* 退出全屏：放左下角，左手单手拇指直接够到 */}
+                      <button onClick={exitFs} aria-label="退出全屏"
+                        className="hg-chip-strong absolute left-4 z-40 h-11 pl-2.5 pr-3.5 rounded-full backdrop-blur-md flex items-center gap-1.5 pressable elev-2"
+                        style={{ bottom: rotated || vpLandscape ? 100 : "calc(var(--sab, 0px) + 100px)" }}>
+                        <ICompress size={18} /><span className="text-[12px] font-semibold hg-ink">退出全屏</span>
+                      </button>
                       <div className="absolute inset-x-0 z-30 px-4" style={{ bottom: rotated || vpLandscape ? 46 : "calc(var(--sab, 0px) + 52px)", height: 26 }}>
                         <div className="relative h-full" style={{ touchAction: "none" }}
                           onPointerDown={onBarDown} onPointerMove={onBarMove} onPointerUp={onBarUp} onPointerCancel={onBarUp}>
@@ -938,22 +1267,60 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                       <div className="absolute inset-x-0 z-40 flex items-center gap-3 px-4"
                         style={{ bottom: rotated || vpLandscape ? 10 : "calc(var(--sab, 0px) + 10px)" }}>
                         <button onClick={() => videoRef.current?.toggle()}
-                          className="hg-chip shrink-0 w-9 h-9 rounded-full flex items-center justify-center pressable">
-                          {paused ? <IPlayF size={18} /> : <IPauseF size={17} />}
+                          className="hg-chip shrink-0 h-9 pl-2 pr-3 rounded-full flex items-center gap-1 pressable">
+                          {paused ? <IPlayF size={16} /> : <IPauseF size={15} />}
+                          <span className="text-[11.5px] font-semibold hg-ink">{paused ? "播放" : "暂停"}</span>
                         </button>
                         <span className="shrink-0 text-[11.5px] font-semibold hg-ink-2 tabular-nums">{fmtTime(time)}</span>
                         <button
                           onClick={() => {
-                            if (speedLock) { setSpeedLock(false); return; }
-                            const seq = [1, 1.25, 1.5, 2];
-                            const idx = seq.indexOf(rate);
-                            setRate(seq[(idx + 1) % seq.length]);
+                            if (speedLock) { setSpeedLock(false); toast("已解除倍速锁定", "info"); return; }
+                            setSpeedPanel(v => !v);
                           }}
                           className={`ml-auto shrink-0 flex items-center gap-1 px-2.5 h-8 rounded-full text-[12px] font-bold pressable ${effRate !== 1 ? "bg-primary text-on-primary" : "hg-chip hg-ink-2"}`}>
                           <IBoltF size={12} />{effRate}x
                         </button>
                         <span className="shrink-0 text-[11.5px] hg-ink-4 tabular-nums">{fmtTime(duration)}</span>
                       </div>
+                      {/* 倍速面板：预设 0.5-4x + 自定义（0.25-6） */}
+                      {speedPanel && (
+                        <div className="absolute right-4 z-50 rounded-2xl hg-chip-strong backdrop-blur-md elev-3 p-3 w-[220px]"
+                          style={{ bottom: rotated || vpLandscape ? 52 : "calc(var(--sab, 0px) + 52px)" }}
+                          onPointerDown={(e) => e.stopPropagation()}>
+                          <div className="text-[11px] font-semibold hg-ink-3 mb-2 px-0.5">播放速度</div>
+                          <div className="grid grid-cols-4 gap-1.5">
+                            {SPEED_PRESETS.map((v) => (
+                              <button key={v}
+                                onClick={() => { setRate(v); videoRef.current?.rate(v); setSpeedPanel(false); setCustomRateOpen(false); }}
+                                className={`h-9 rounded-full text-[12.5px] font-bold pressable ${rate === v ? "bg-primary text-on-primary" : "hg-chip hg-ink-2"}`}>
+                                {v === 1 ? "正常" : `${v}x`}
+                              </button>
+                            ))}
+                          </div>
+                          {customRateOpen ? (
+                            <form className="flex items-center gap-2 mt-2 px-0.5"
+                              onSubmit={(e) => {
+                                e.preventDefault();
+                                const v = Number(customRateVal);
+                                if (!isFinite(v) || v < 0.25 || v > 6) { toast("倍速范围 0.25 - 6", "info"); return; }
+                                const r = Math.round(v * 100) / 100;
+                                setRate(r); videoRef.current?.rate(r);
+                                setCustomRateOpen(false); setSpeedPanel(false);
+                              }}>
+                              <input autoFocus type="number" min={0.25} max={6} step={0.05} value={customRateVal}
+                                placeholder="0.25-6" aria-label="自定义倍速" inputMode="decimal"
+                                onChange={(e) => setCustomRateVal(e.target.value)}
+                                className="flex-1 min-w-0 h-9 px-3 rounded-full hg-chip hg-ink-2 text-[12.5px] outline-none" />
+                              <button type="submit" className="h-9 px-4 rounded-full bg-primary text-on-primary text-[12.5px] font-bold pressable">确定</button>
+                            </form>
+                          ) : (
+                            <button onClick={() => { setCustomRateVal(String(rate)); setCustomRateOpen(true); }}
+                              className="w-full h-9 mt-1.5 rounded-full hg-chip hg-ink-2 text-[12.5px] font-semibold pressable">
+                              {!SPEED_PRESETS.includes(rate) ? `${rate}x（自定义）` : "自定义倍速"}
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
@@ -1048,14 +1415,16 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                   </div>
                 ) : (
                   <div className="absolute inset-x-0 z-20 flex items-center gap-2 px-2.5" style={{ top: "calc(var(--sat, 0px) + 8px)", paddingRight: 148 }}>
-                    <button onClick={onBack} aria-label="返回" className="hg-chip w-9 h-9 rounded-full flex items-center justify-center pressable elev-1"><IBack size={20} /></button>
+                    <button onClick={onBack} aria-label="返回" className="hg-chip h-9 pl-2 pr-3 rounded-full flex items-center gap-1 pressable elev-1">
+                      <IBack size={18} /><span className="text-[12px] font-semibold hg-ink">返回</span>
+                    </button>
                     <span className="text-[14.5px] font-semibold hg-ink hg-ov-shadow truncate">{title}</span>
                     <span className="ml-auto px-2 py-0.5 rounded-full hg-chip text-[11px] font-semibold" style={{ color: "rgba(255,255,255,.9)" }}>{index + 1} / {videoIds.length}</span>
                   </div>
                 )
               ) : null}
 
-              {/* 右侧操作栏（移动端）：收藏 / 评论 / 全屏 / 分享
+              {/* 右侧操作栏（移动端）：只保留 收藏 / 全屏
                   颜色写死不跟主题走：浅色主题下这些字必须仍是白色 */}
               {!fs && !clean && !isDesktop && (
                 <div className="absolute right-3 z-20 flex flex-col items-center gap-[16px]"
@@ -1064,17 +1433,9 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                     {isFav(curId) ? <IStarF size={27} className="hg-gold" /> : <IStar size={27} className="hg-ink hg-ov-shadow" />}
                     <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">收藏</span>
                   </button>
-                  <button onClick={() => setPanel("comments")} className="flex flex-col items-center gap-1 pressable" aria-label="评论">
-                    <ICommentF size={26} className="hg-ink hg-ov-shadow" />
-                    <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">评论</span>
-                  </button>
                   <button onClick={enterFs} className="flex flex-col items-center gap-1 pressable" aria-label="全屏">
                     <IExpand size={26} className="hg-ink hg-ov-shadow" />
                     <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">全屏</span>
-                  </button>
-                  <button onClick={shareLink} className="flex flex-col items-center gap-1 pressable" aria-label="分享">
-                    <ILink size={25} className="hg-ink hg-ov-shadow" />
-                    <span className="text-[10.5px] hg-ink-2 hg-ov-shadow">分享</span>
                   </button>
                 </div>
               )}
@@ -1160,10 +1521,19 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
                     style={{ background: "linear-gradient(0deg, rgba(0,0,0,.82) 0%, rgba(0,0,0,.42) 45%, transparent 100%)" }} />
                   <p className="relative px-4 pb-2 text-[14px] font-semibold leading-snug hg-ink hg-ov-shadow clamp-2">{meta.title}</p>
                   <div className="relative pt-1.5 pb-2">
-                    <button onClick={() => setPanel("detail")}
-                      className="px-4 flex items-center gap-0.5 text-[10.5px] font-medium hg-ink hg-ov-shadow pressable">
-                      详情 · 第 {curEp} 集<IChevR size={11} />
-                    </button>
+                    {/* 左下角两项：选集（第一个）/ 详情（第二个）——都贴屏幕底部，单手拇指可达 */}
+                    <div className="px-4 flex items-center gap-2">
+                      <button onClick={() => setPanel("episodes")}
+                        className="flex items-center gap-1 h-7 pl-3 pr-2 rounded-full hg-chip text-[11px] font-semibold hg-ink pressable">
+                        <IList size={12} />
+                        <span className="tabular-nums">选集 · 第 {curEp}{episodes.length ? `/${episodes.length}` : ""} 集</span>
+                        <IChevR size={11} />
+                      </button>
+                      <button onClick={() => setPanel("detail")}
+                        className="flex items-center gap-1 h-7 pl-3 pr-2 rounded-full hg-chip text-[11px] font-semibold hg-ink pressable">
+                        <IInfo size={12} />详情<IChevR size={11} />
+                      </button>
+                    </div>
                     {isActive && (
                       <div className="mx-4 mt-1.5 relative" style={{ height: 22, touchAction: "none" }}
                         onPointerDown={onBarDown} onPointerMove={onBarMove} onPointerUp={onBarUp} onPointerCancel={onBarUp}>
@@ -1220,7 +1590,9 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
         <div className={`desktop-dock-panel ${panel ? "is-open" : ""}`}>
           <div className="desktop-dock-inner">
             {panel === "episodes" ? (
-              <EpisodesPanel videoId={curId} episodes={episodes} current={curEp} onPick={pickEp} onClose={() => setPanel(null)} />
+              <EpisodesPanel videoId={curId} episodes={episodes} current={curEp} onPick={pickEp} onClose={() => setPanel(null)}
+                dlState={dlState} downloadAll={downloadAll} dlAllRunning={dlAllRunning}
+                onDownloadEps={downloadSelected} />
             ) : panel === "comments" ? (
               <CommentsPanel videoId={curId} ep={curEp} total={meta.comment} kind={kind} onClose={() => setPanel(null)} />
             ) : null}
@@ -1242,69 +1614,65 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
             </div>
           </Sheet>
 
-          <Sheet open={panel === "detail" || panel === "episodes"} onClose={() => setPanel(null)}>
-            <div className="flex flex-col" style={{ height: "72vh" }}>
-              {/* 双栏抽屉：详情 / 选集 */}
+          {/* 选集：靠下三行排列，放不下的集数左右滑动 */}
+          <Sheet open={panel === "episodes"} onClose={() => setPanel(null)}>
+            <EpisodesPanel layout="rows3" videoId={curId} episodes={episodes} current={curEp}
+              onPick={pickEp} onClose={() => setPanel(null)}
+              dlState={dlState} downloadAll={downloadAll} dlAllRunning={dlAllRunning}
+              onDownloadEps={downloadSelected} />
+          </Sheet>
+
+          {/* 详情：同样是靠下的紧凑面板 */}
+          <Sheet open={panel === "detail"} onClose={() => setPanel(null)}>
+            <div className="flex flex-col pb-3" style={{ maxHeight: "66vh" }}>
               <div className="shrink-0 flex items-center gap-2 px-4 pb-2">
-                <div className="flex flex-1 bg-s3 rounded-(--r-ctl) p-1">
-                  {([["detail", "详情"], ["episodes", "选集"]] as const).map(([k, l]) => (
-                    <button key={k} onClick={() => setPanel(k)}
-                      className={`flex-1 h-8 rounded-(--r-ctl) text-[12px] font-semibold pressable ${panel === k ? "text-on-sec" : "text-mut"}`}
-                      style={panel === k ? { background: "var(--p-sec)", color: "var(--p-primary)" } : undefined}>{l}</button>
-                  ))}
-                </div>
+                <span className="text-[13.5px] font-bold text-on">详情</span>
+                {episodes.length > 0 && <span className="text-[10.5px] text-mut">共 {episodes.length} 集</span>}
                 <button onClick={() => setPanel(null)} aria-label="关闭"
-                  className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-mut pressable">
-                  <IClose size={14} />
+                  className="ml-auto w-7 h-7 rounded-full bg-s3 flex items-center justify-center text-mut pressable">
+                  <IClose size={13} />
                 </button>
               </div>
-
-              <div className="flex-1 min-h-0">
-                {panel === "episodes" ? (
-                  <EpisodesPanel bare videoId={curId} episodes={episodes} current={curEp} onPick={pickEp} onClose={() => setPanel(null)} />
-                ) : (
-                  <div className="h-full scroll-y px-4 pb-5">
-                    {/* 封面 / 标题 / 评分 / 数据 */}
-                    <div className="flex gap-3">
-                      <div className="relative w-[84px] shrink-0 rounded-(--r-sm) overflow-hidden bg-s3" style={{ aspectRatio: "3 / 4" }}>
-                        <Img src={meta.cover} />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[13.5px] font-bold text-on leading-snug clamp-2">{meta.title}</div>
-                        <div className="flex items-center gap-2 mt-1.5">
-                          {!!meta.score && <span className="text-[12px] font-bold text-amber">{meta.score.toFixed(1)} 分</span>}
-                          {episodes.length > 0 && <span className="text-[10.5px] text-mut">共 {episodes.length} 集</span>}
-                        </div>
-                        <div className="flex gap-3 mt-2 text-[10.5px] text-mut">
-                          <span>点赞 {fmt(meta.like)}</span>
-                          <span>收藏 {fmt(meta.collect)}</span>
-                          <span>评论 {fmt(meta.comment)}</span>
-                        </div>
-                      </div>
+              <div className="scroll-y px-4 pb-2">
+                {/* 封面 / 标题 / 评分 / 数据 */}
+                <div className="flex gap-3">
+                  <div className="relative w-[84px] shrink-0 rounded-(--r-sm) overflow-hidden bg-s3" style={{ aspectRatio: "3 / 4" }}>
+                    <Img src={meta.cover} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[13.5px] font-bold text-on leading-snug clamp-2">{meta.title}</div>
+                    <div className="flex items-center gap-2 mt-1.5">
+                      {!!meta.score && <span className="text-[12px] font-bold text-amber">{meta.score.toFixed(1)} 分</span>}
+                      {episodes.length > 0 && <span className="text-[10.5px] text-mut">共 {episodes.length} 集</span>}
                     </div>
-
-                    {/* 作者 + 关注 */}
-                    <div className="mt-4 flex items-center gap-2.5 rounded-(--r-md) bg-s2 p-2.5">
-                      <Avatar size={34} name={meta.author} hue={220} />
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[12.5px] font-semibold text-on truncate">{meta.author}</div>
-                        <div className="text-[10px] text-mut">作者</div>
-                      </div>
-                      {meta.authorId > 0 && (
-                        <button onClick={onFollow}
-                          className={`h-7 px-3 rounded-full text-[11px] font-semibold pressable ${store.follows.includes(meta.authorId) ? "bg-s3 text-mut" : "bg-primary text-on-primary"}`}>
-                          {store.follows.includes(meta.authorId) ? "已关注" : "+ 关注"}
-                        </button>
-                      )}
-                    </div>
-
-                    {/* 简介 */}
-                    <div className="mt-4">
-                      <div className="text-[11px] font-semibold text-dim mb-1.5">简介</div>
-                      <p className="text-[11.5px] leading-relaxed text-mut whitespace-pre-wrap">{meta.desc || "暂无简介"}</p>
+                    <div className="flex gap-3 mt-2 text-[10.5px] text-mut">
+                      <span>点赞 {fmt(meta.like)}</span>
+                      <span>收藏 {fmt(meta.collect)}</span>
+                      <span>评论 {fmt(meta.comment)}</span>
                     </div>
                   </div>
-                )}
+                </div>
+
+                {/* 作者 */}
+                <div className="mt-3.5 flex items-center gap-2.5 rounded-(--r-md) bg-s2 p-2.5">
+                  <Avatar size={34} name={meta.author} hue={220} />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[12.5px] font-semibold text-on truncate">{meta.author}</div>
+                    <div className="text-[10px] text-mut">作者</div>
+                  </div>
+                  {meta.authorId > 0 && (
+                    <button onClick={onFollow}
+                      className={`h-7 px-3 rounded-full text-[11px] font-semibold pressable ${store.follows.includes(meta.authorId) ? "bg-s3 text-mut" : "bg-primary text-on-primary"}`}>
+                      {store.follows.includes(meta.authorId) ? "已关注" : "+ 关注"}
+                    </button>
+                  )}
+                </div>
+
+                {/* 简介 */}
+                <div className="mt-3.5">
+                  <div className="text-[11px] font-semibold text-dim mb-1.5">简介</div>
+                  <p className="text-[11.5px] leading-relaxed text-mut whitespace-pre-wrap">{meta.desc || "暂无简介"}</p>
+                </div>
               </div>
             </div>
           </Sheet>
@@ -1314,13 +1682,18 @@ export default function Feed({ videoIds, startIndex = 0, title = "", mode, kind 
       {!isDesktop && !fs && !clean && !controlsLocked && active && (
         <div className="absolute right-3 z-40 flex items-center gap-2" style={{ top: "calc(var(--sat, 0px) + 6px)" }}>
           <button onClick={() => setMuted(m => !m)} aria-label={muted ? "取消静音" : "静音"}
-            className="hg-chip w-9 h-9 rounded-full flex items-center justify-center pressable elev-1">
-            {muted ? <IVolMute size={17} /> : <IVol size={17} />}
+            className="hg-chip h-8 pl-2 pr-2.5 rounded-full flex items-center gap-1 pressable elev-1">
+            {muted ? <IVolMute size={15} /> : <IVol size={15} />}
+            <span className="text-[11px] font-semibold hg-ink">{muted ? "开声音" : "静音"}</span>
           </button>
           <button onClick={lockControls} aria-label="锁定播放控制" title="锁定播放控制" aria-pressed={false}
-            className="hg-chip w-9 h-9 rounded-full flex items-center justify-center pressable elev-1"><ILockF size={17} /></button>
+            className="hg-chip h-8 pl-2 pr-2.5 rounded-full flex items-center gap-1 pressable elev-1">
+            <ILockF size={15} /><span className="text-[11px] font-semibold hg-ink">锁定</span>
+          </button>
           <button onClick={() => store.setTab("search")} aria-label="搜索"
-            className="hg-chip w-9 h-9 rounded-full flex items-center justify-center pressable elev-1"><ISearch size={18} /></button>
+            className="hg-chip h-8 pl-2 pr-2.5 rounded-full flex items-center gap-1 pressable elev-1">
+            <ISearch size={15} /><span className="text-[11px] font-semibold hg-ink">搜索</span>
+          </button>
         </div>
       )}
       {controlsLocked && <PlaybackLock active={active} onUnlock={() => { setControlsLocked(false); wake(); }} />}

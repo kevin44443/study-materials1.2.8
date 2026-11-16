@@ -2,14 +2,19 @@ import { useEffect, useRef, useState } from "react";
 import { api, fmt } from "../api";
 import type { RankItem, VideoCard } from "../types";
 import { useStore } from "../store";
-import { Masonry, RankRow } from "../components/cards";
+import { Masonry, RankCard } from "../components/cards";
 import { Empty } from "../components/ui";
 import { IBack, IClose, IFireF, IRefresh, ISearch, ITrophy } from "../icons";
 
-const HOT_TAGS = ["都市", "逆袭", "古风", "系统", "后宫", "校园", "仙侠", "职场", "大男主", "御姐", "脑洞", "奇幻"];
+/* 热门题材：既可用于搜索也代表站内热门方向 */
+const HOT_TAGS = [
+  "女儿", "闺蜜", "多P", "都市", "逆袭", "古风",
+  "系统", "后宫", "校园", "仙侠", "职场", "御姐",
+  "大男主", "脑洞", "奇幻",
+];
 
 export default function Search({ active, wide }: { active: boolean; wide: boolean }) {
-  const { push, searchHist, addSearch, clearSearchHist, toast } = useStore();
+  const { push, searchHist, addSearch, clearSearchHist } = useStore();
   const [q, setQ] = useState("");
   const [submitted, setSubmitted] = useState("");
   const [items, setItems] = useState<VideoCard[]>([]);
@@ -19,6 +24,25 @@ export default function Search({ active, wide }: { active: boolean; wide: boolea
   const [err, setErr] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const busy = useRef(false);
+  /* 输入法键盘高度：聚焦输入时把底部搜索框顶到键盘上方，不被键盘遮挡 */
+  const [kbH, setKbH] = useState(0);
+  /* 聚焦后搜索框移到页面中央（键盘上方可视区中心），失焦回到屏幕下方 */
+  const [focused, setFocused] = useState(false);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const onR = () => {
+      const h = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      setKbH(h > 120 ? h : 0);
+    };
+    vv.addEventListener("resize", onR);
+    vv.addEventListener("scroll", onR);
+    onR();
+    return () => {
+      vv.removeEventListener("resize", onR);
+      vv.removeEventListener("scroll", onR);
+    };
+  }, []);
 
   useEffect(() => {
     if (active && !/Android/i.test(navigator.userAgent)) inputRef.current?.focus();
@@ -61,81 +85,113 @@ export default function Search({ active, wide }: { active: boolean; wide: boolea
 
   return (
     <div className="absolute inset-0 bg-bg flex flex-col">
-      {/* 搜索栏 */}
-      <div className="shrink-0 px-4 pb-3 flex items-center gap-2.5" style={{ paddingTop: "calc(var(--sat, 0px) + 12px)" }}>
-        <form className="flex-1 flex items-center gap-2 h-11 rounded-(--r-ctl) bg-s3 px-3.5 focus-within:bg-s4 transition-colors"
-          onSubmit={(e) => { e.preventDefault(); submit(q); }}>
-          <ISearch size={17} className="text-mut shrink-0" />
-          <input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索短剧、作者、题材…"
-            className="flex-1 min-w-0 bg-transparent text-[13.5px] text-on placeholder-dim outline-none" />
-          {q && <button type="button" onClick={() => { setQ(""); setSubmitted(""); setItems([]); }} className="w-5 h-5 rounded-full bg-s4 flex items-center justify-center text-mut pressable"><IClose size={11} /></button>}
-        </form>
-        <button onClick={() => push({ kind: "ranks" })} aria-label="排行榜"
-          className="w-11 h-11 rounded-(--r-sm) flex items-center justify-center bg-primary text-on-primary pressable elev-2">
-          <ITrophy size={19} />
-        </button>
+      {/* 顶部只留标题：搜索框特意放到屏幕下方，单手拇指更好按 */}
+      <div className="shrink-0 px-4" style={{ paddingTop: "calc(var(--sat, 0px) + 14px)" }}>
+        <div className="flex items-end gap-2.5">
+          <span className="text-[24px] font-bold text-on leading-none">搜索</span>
+          <span className="text-[11px] text-mut pb-0.5">搜短剧 · 找题材</span>
+        </div>
       </div>
 
-      <div className="flex-1 scroll-y px-4 pb-24">
-        {!querying ? (
-          <>
-            {searchHist.length > 0 && (
-              <div className="mt-1 a-rise">
-                <div className="flex items-center justify-between">
-                  <span className="text-[13px] font-bold text-on">搜索历史</span>
-                  <button onClick={clearSearchHist} className="text-[11px] text-dim pressable">清空</button>
+      <div className="relative flex-1 min-h-0">
+        <div className="absolute inset-0 scroll-y px-4 pt-3" style={{ paddingBottom: kbH > 0 ? `calc(${kbH}px + 116px)` : "calc(var(--sab, 0px) + 132px)" }}>
+          {!querying ? (
+            <>
+              {searchHist.length > 0 && (
+                <div className="mt-1 a-rise">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[13px] font-bold text-on">搜索历史</span>
+                    <button onClick={clearSearchHist} className="text-[11px] text-dim pressable">清空</button>
+                  </div>
+                  <div className="flex flex-wrap gap-2 mt-2.5">
+                    {searchHist.map((h) => (
+                      <button key={h} onClick={() => { setQ(h); submit(h); }} className="px-3.5 h-8 rounded-(--r-ctl) bg-s3 text-[12px] text-on/80 pressable">{h}</button>
+                    ))}
+                  </div>
                 </div>
-                <div className="flex flex-wrap gap-2 mt-2.5">
-                  {searchHist.map((h) => (
-                    <button key={h} onClick={() => { setQ(h); submit(h); }} className="px-3.5 h-8 rounded-(--r-ctl) bg-s3 text-[12px] text-on/80 pressable">{h}</button>
+              )}
+
+              <div className="mt-5 rounded-(--r-md) bg-s2 p-3.5 a-rise">
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-[13px] font-semibold text-on/90"><IFireF size={15} className="text-primary" />热门题材</span>
+                  <button onClick={() => push({ kind: "ranks" })} className="text-[11px] text-primary font-semibold pressable">完整榜单 ›</button>
+                </div>
+                <div className="flex flex-wrap gap-2 mt-3">
+                  {HOT_TAGS.map((t) => (
+                    <button key={t} onClick={() => { setQ(t); submit(t); }}
+                      className="px-3 h-7 rounded-(--r-ctl) bg-s3 text-[12px] text-on/85 pressable">{t}</button>
                   ))}
                 </div>
               </div>
-            )}
 
-            <div className="mt-5 rounded-(--r-md) bg-s2 p-3.5 a-rise">
-              <div className="flex items-center justify-between">
-                <span className="flex items-center gap-1.5 text-[13px] font-semibold text-on/90"><IFireF size={15} className="text-primary" />热门题材</span>
-                <button onClick={() => push({ kind: "ranks" })} className="text-[11px] text-primary font-semibold pressable">完整榜单 ›</button>
+              <div className="flex items-center justify-between mt-6 mb-2.5">
+                <span className="text-[13px] font-bold text-on">为你推荐</span>
+                <button onClick={() => submit(HOT_TAGS[Math.floor(Math.random() * HOT_TAGS.length)])}
+                  className="flex items-center gap-1 text-[11.5px] text-mut pressable"><IRefresh size={13} />换一批</button>
               </div>
-              <div className="flex flex-wrap gap-2 mt-3">
-                {HOT_TAGS.map((t) => (
-                  <button key={t} onClick={() => { setQ(t); submit(t); }}
-                    className="px-3 h-7 rounded-(--r-ctl) bg-s3 text-[12px] text-on/85 pressable">{t}</button>
-                ))}
-              </div>
-            </div>
+              <p className="text-[11.5px] text-dim leading-relaxed">
+                下方输入关键词后按回车搜索，也可以点上面的题材直接看片单。
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="text-[11.5px] text-mut mt-1 mb-2.5">「{submitted}」共 <span className="text-primary font-bold">{items.length}</span> 条结果</div>
+              {items.length ? (
+                <>
+                  <Masonry videos={items} wide={wide} onOpen={(v) => push({ kind: "feed", videoIds: items.map((x) => x.id), index: items.findIndex((x) => x.id === v.id), title: `搜索 · ${submitted}` })} />
+                  <div className="flex justify-center py-4">
+                    {loading ? <div className="w-6 h-6 spinner" />
+                      : page < pages ? (
+                        <button onClick={() => run(submitted, page + 1)} className="px-5 h-9 rounded-(--r-ctl) bg-s3 text-[12px] text-on/85 pressable">加载更多</button>
+                      ) : <span className="text-[10.5px] text-dim">— 已经到底啦 —</span>}
+                  </div>
+                </>
+              ) : loading ? (
+                <div className="flex justify-center py-12"><div className="w-8 h-8 spinner" /></div>
+              ) : (
+                <Empty icon={<ISearch size={26} />} title={err || "没有找到相关内容"} sub="换个关键词试试，比如「都市」「逆袭」"
+                  action="看看热榜" onAction={() => push({ kind: "ranks" })} />
+              )}
+            </>
+          )}
+        </div>
 
-            <div className="flex items-center justify-between mt-6 mb-2.5">
-              <span className="text-[13px] font-bold text-on">为你推荐</span>
-              <button onClick={() => submit(HOT_TAGS[Math.floor(Math.random() * HOT_TAGS.length)])}
-                className="flex items-center gap-1 text-[11.5px] text-mut pressable"><IRefresh size={13} />换一批</button>
-            </div>
-            <p className="text-[11.5px] text-dim leading-relaxed">
-              输入关键词后按回车搜索，也可以点上面的题材直接看片单。
-            </p>
-          </>
-        ) : (
-          <>
-            <div className="text-[11.5px] text-mut mt-1 mb-2.5">「{submitted}」共 <span className="text-primary font-bold">{items.length}</span> 条结果</div>
-            {items.length ? (
-              <>
-                <Masonry videos={items} wide={wide} onOpen={(v) => push({ kind: "feed", videoIds: items.map((x) => x.id), index: items.findIndex((x) => x.id === v.id), title: `搜索 · ${submitted}` })} />
-                <div className="flex justify-center py-4">
-                  {loading ? <div className="w-6 h-6 spinner" />
-                    : page < pages ? (
-                      <button onClick={() => run(submitted, page + 1)} className="px-5 h-9 rounded-(--r-ctl) bg-s3 text-[12px] text-on/85 pressable">加载更多</button>
-                    ) : <span className="text-[10.5px] text-dim">— 已经到底啦 —</span>}
-                </div>
-              </>
-            ) : loading ? (
-              <div className="flex justify-center py-12"><div className="w-8 h-8 spinner" /></div>
-            ) : (
-              <Empty icon={<ISearch size={26} />} title={err || "没有找到相关内容"} sub="换个关键词试试，比如「都市」「逆袭」"
-                action="看看热榜" onAction={() => push({ kind: "ranks" })} />
-            )}
-          </>
+        {/* 聚焦遮罩：点空白处收起键盘，搜索框回到底部 */ }
+        {focused && (
+          <div className="absolute inset-0 z-10" style={{ background: "rgba(0,0,0,.38)" }}
+            onPointerDown={() => inputRef.current?.blur()} />
         )}
+
+        {/* 底部搜索栏（贴屏幕下方，单手可达；聚焦后浮到页面中央，键盘弹出时同样避让） */}
+        <div className={`absolute inset-x-0 pointer-events-none px-4 pt-8 z-20 transition-[bottom,opacity] duration-200 ${focused ? "pb-3" : ""}`}
+          style={{
+            bottom: focused
+              ? `${kbH + Math.max(24, (window.innerHeight - kbH) / 2 - 34)}px`
+              : kbH > 0 ? `${kbH}px` : "calc(var(--sab, 0px) + 60px)",
+            background: focused
+              ? "transparent"
+              : "linear-gradient(0deg, var(--p-bg) 0%, var(--p-bg) 68%, transparent 100%)",
+          }}>
+          <form className="pointer-events-auto flex items-center gap-2.5"
+            onSubmit={(e) => { e.preventDefault(); submit(q); inputRef.current?.blur(); }}>
+            <div className={`flex-1 flex items-center gap-2 h-11 rounded-(--r-ctl) bg-s3 px-3.5 focus-within:bg-s4 transition-all elev-1 ${focused ? "ring-1 ring-primary/45" : ""}`}
+              style={{ boxShadow: focused ? "0 10px 34px rgba(0,0,0,.35)" : "0 6px 20px rgba(0,0,0,.16)" }}>
+              <ISearch size={17} className="text-mut shrink-0" />
+              <input ref={inputRef} value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索短剧、作者、题材…"
+                onFocus={() => setFocused(true)} onBlur={() => setFocused(false)}
+                className="flex-1 min-w-0 bg-transparent text-[13.5px] text-on placeholder-dim outline-none" />
+              {q && <button type="button" onClick={() => { setQ(""); setSubmitted(""); setItems([]); }} className="w-5 h-5 rounded-full bg-s4 flex items-center justify-center text-mut pressable"><IClose size={11} /></button>}
+            </div>
+            <button type="submit" aria-label="搜索"
+              className="h-11 px-3 rounded-(--r-sm) flex items-center gap-1 bg-primary text-on-primary pressable elev-2 shrink-0">
+              <ISearch size={17} /><span className="text-[12.5px] font-bold">搜索</span>
+            </button>
+            <button type="button" onClick={() => push({ kind: "ranks" })} aria-label="排行榜"
+              className="h-11 px-3 rounded-(--r-sm) flex items-center gap-1 bg-s2 text-primary pressable elev-2 shrink-0">
+              <ITrophy size={17} /><span className="text-[12.5px] font-bold">榜单</span>
+            </button>
+          </form>
+        </div>
       </div>
     </div>
   );
@@ -191,14 +247,16 @@ export function RankPage({ onBack, wide }: { onBack: () => void; wide: boolean }
         </div>
       </div>
 
-      <div className="flex-1 scroll-y px-3.5 pt-3 pb-8">
+      <div className="flex-1 scroll-y pt-3 pb-8">
         {loading ? (
           <div className="flex justify-center py-12"><div className="w-8 h-8 spinner" /></div>
         ) : items.length ? (
-          items.map((it) => (
-            <RankRow key={`${it.video_id}-${it.rank}`} item={it} metricMax={max}
-              onOpen={() => push({ kind: "feed", videoIds: items.map((x) => x.video_id), index: items.findIndex((x) => x.video_id === it.video_id), title: "HG 热榜" })} />
-          ))
+          <div className={`grid gap-2.5 px-3.5 ${wide ? "grid-cols-3 xl:grid-cols-4" : "grid-cols-2"}`}>
+            {items.map((it) => (
+              <RankCard key={`${it.video_id}-${it.rank}`} item={it} metricMax={max}
+                onOpen={() => push({ kind: "feed", videoIds: items.map((x) => x.video_id), index: items.findIndex((x) => x.video_id === it.video_id), title: "HG 热榜" })} />
+            ))}
+          </div>
         ) : (
           <Empty icon={<ITrophy size={26} />} title="榜单暂时为空" sub="稍后再来看看，或者去首页刷刷推荐" />
         )}

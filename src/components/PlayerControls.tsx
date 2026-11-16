@@ -33,11 +33,16 @@ type Props = {
 
 const clock = (s: number) => fmtTime(Math.max(0, s || 0)).padStart(5, "0");
 
+/** 菜单里的预设倍速；不在其中即为自定义倍速 */
+const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+
 export default function PlayerControls({
   paused, time, duration, buffered = 0, rate, muted, volume, theater = false, fullscreen = false,
   visible = true, seekEnabled = true, seekKey, nextDisabled = false, nextTitle = "下一个", onToggle, onSeek, onSeekInteraction, onRate, onMute, onVolume, onPip, onLock, onTheater, onFullscreen, onNext,
 }: Props) {
   const [speedOpen, setSpeedOpen] = useState(false);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customVal, setCustomVal] = useState("");
   const boxRef = useRef<HTMLDivElement>(null);
   const seek = useSeekInput({ time, duration, enabled: seekEnabled, resetKey: seekKey, onInteraction: onSeekInteraction,
     onSeek: (target, input) => onSeek(target, `desktop_${input}`) });
@@ -80,11 +85,32 @@ export default function PlayerControls({
           {speedOpen && (
             <div className="player-speed-menu" role="menu">
               <span className="player-menu-title">播放速度</span>
-              {[0.5, 0.75, 1, 1.25, 1.5, 2].map((v) => (
-                <button key={v} role="menuitemradio" aria-checked={rate === v} onClick={() => { onRate(v); setSpeedOpen(false); }}>
+              {[0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4].map((v) => (
+                <button key={v} role="menuitemradio" aria-checked={rate === v} onClick={() => { onRate(v); setCustomOpen(false); setSpeedOpen(false); }}>
                   <span>{v === 1 ? "正常" : `${v}x`}</span>{rate === v && <ICheck size={14} />}
                 </button>
               ))}
+              {customOpen ? (
+                <form className="flex items-center gap-1.5 px-2 py-1"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const v = Number(customVal);
+                    if (!isFinite(v) || v < 0.25 || v > 6) return;
+                    onRate(Math.round(v * 100) / 100);
+                    setCustomOpen(false); setSpeedOpen(false);
+                  }}>
+                  <input autoFocus type="number" min={0.25} max={6} step={0.05} value={customVal}
+                    placeholder="0.25-6" aria-label="自定义倍速"
+                    onChange={(e) => setCustomVal(e.target.value)}
+                    className="w-[70px] px-1.5 py-0.5 rounded border border-current/30 bg-transparent text-[12px] outline-none" />
+                  <button type="submit" className="text-[12px] font-semibold pressable">确定</button>
+                </form>
+              ) : (
+                <button role="menuitemradio" aria-checked={!SPEED_PRESETS.includes(rate)}
+                  onClick={() => { setCustomVal(String(rate)); setCustomOpen(true); }}>
+                  <span>{!SPEED_PRESETS.includes(rate) ? `${rate}x（自定义）` : "自定义"}</span>{!SPEED_PRESETS.includes(rate) && <ICheck size={14} />}
+                </button>
+              )}
             </div>
           )}
         </div>

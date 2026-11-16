@@ -51,6 +51,10 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
     // 落盘完整错误链（dns error / connection refused / 证书错误…），toast 只显示截断版
     logLine(`[api] ${cmd} → ${msg}`);
     const status = /^HTTP (\d{3})\b/.exec(msg)?.[1];
+    if (status === "410") {
+      // 上游把该内容/频道下线了（410 Gone），不是网络问题，重试无意义
+      throw new Error("该内容已下线");
+    }
     if (status) {
       throw new Error(`服务器请求失败（HTTP ${status}），请稍后重试或在设置中切换线路`);
     }

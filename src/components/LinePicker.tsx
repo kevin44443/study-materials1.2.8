@@ -33,7 +33,7 @@ function Row({ item, current, probe, busy, disabled, onPick, onProbe }: {
 
 /* 线路选择：桌面居中弹窗，移动端底部抽屉 */
 export default function LinePicker({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { toast, setUser } = useStore();
+  const { toast } = useStore();
   const [state, setState] = useState<LineState | null>(null);
   const [mirrors, setMirrors] = useState<LineItem[] | null>(null);
   const [mirrorErr, setMirrorErr] = useState("");
@@ -90,9 +90,8 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
     setSwitching(url);
     try {
       const next = await api.lineSet(url);
-      if (next !== state?.base) setUser(null);
       setState((s) => (s ? { ...s, base: next } : s));
-      toast(`线路已切换到 ${hostOf(next)}，跨站点需重新登录`, "ok");
+      toast(`线路已切换到 ${hostOf(next)}`, "ok");
     } catch (e) {
       toast((e as Error).message || "切换失败", "info");
     } finally {
@@ -111,7 +110,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
           <div className="text-[14px] font-bold text-on leading-tight">线路</div>
           <div className="text-[10.5px] text-mut mt-0.5 truncate">当前：{state ? hostOf(state.base) : "读取中…"}</div>
         </div>
-        <button onClick={onClose} aria-label="关闭" className="w-8 h-8 rounded-full bg-s3/80 flex items-center justify-center text-mut pressable"><IClose size={16} /></button>
+        <button onClick={onClose} className="h-8 px-2.5 rounded-full bg-s3/80 flex items-center gap-1 text-mut pressable"><IClose size={13} /><span className="text-[11.5px] font-semibold">关闭</span></button>
       </div>
 
       <div className="flex-1 scroll-y px-3 pb-4">

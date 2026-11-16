@@ -1,17 +1,37 @@
 import { useEffect, useState } from "react";
-import { api, APP_VERSION, fmt, fmtTime, isMobile, platform } from "../api";
+import { invoke } from "@tauri-apps/api/core";
+import { api, APP_VERSION, fmtTime, isMobile, platform } from "../api";
 import type { Detail } from "../types";
-import { useStore } from "../store";
+import { SKINS, useStore } from "../store";
 import { Avatar, Empty, Img } from "../components/ui";
-import { IChevR, IClock, ILogout, ISettings, IStar, IUser } from "../icons";
+import { ICheck, IChevR, IClock, IDownload, ISettings, IStar } from "../icons";
 
-/* 我的：结构固定（资料卡 + 我的收藏 / 观看历史）。
-   收藏与观看记录都存在本地，所以未登录也照常展示；未登录时资料卡本身就是登录入口。 */
+/* 我的：结构固定（本地资料卡 + 皮肤 + 离线视频 + 观看历史 / 我的收藏）。
+   已移除账号体系：收藏、历史、点赞全部保存在本地，可到设置里导出备份。 */
 export default function Profile({ wide }: { wide: boolean }) {
-  const { user, setLoginOpen, logout, history, favs, clearHistory, push } = useStore();
-  const [tab, setTab] = useState<"fav" | "history">("fav");
+  const { history, favs, clearHistory, push, likes, skin, setSkin, toast } = useStore();
+  const [tab, setTab] = useState<"fav" | "history">("history");
   const [cards, setCards] = useState<Detail[]>([]);
   const [loading, setLoading] = useState(false);
+  /* 离线视频：正在下载 / 已完成数量（我的页入口上直接显示） */
+  const [dlCount, setDlCount] = useState({ run: 0, done: 0 });
+  useEffect(() => {
+    let alive = true;
+    const pull = () => invoke<{ items?: { status: string; auto?: boolean }[] }>("dl_list")
+      .then((r) => {
+        if (!alive) return;
+        /* 自动预缓存的条目不算「下载」，不在这里计数 */
+        const it = (r?.items || []).filter((x) => x.auto !== true);
+        setDlCount({
+          run: it.filter((x) => x.status !== "done").length,
+          done: it.filter((x) => x.status === "done").length,
+        });
+      })
+      .catch(() => {});
+    void pull();
+    const t = window.setInterval(pull, 4000);
+    return () => { alive = false; window.clearInterval(t); };
+  }, []);
 
   const ids = tab === "fav" ? favs : history.map((h) => h.id);
   /** 观看记录里这条的进度（收藏页没有） */
@@ -36,52 +56,73 @@ export default function Profile({ wide }: { wide: boolean }) {
         <div className="text-[24px] font-bold text-on leading-none">我的</div>
         {isMobile && (
           <button onClick={() => push({ kind: "settings" })} aria-label="设置"
-            className="ml-auto w-9 h-9 rounded-full bg-s3 flex items-center justify-center text-mut pressable">
-            <ISettings size={17} strokeWidth={1.7} />
+            className="ml-auto h-9 pl-2 pr-3 rounded-full bg-s3 flex items-center gap-1 text-mut pressable">
+            <ISettings size={16} strokeWidth={1.7} /><span className="text-[12px] font-semibold">设置</span>
           </button>
         )}
       </div>
 
-      <div className="flex-1 scroll-y px-4 pt-2 pb-24">
-        {/* 资料卡：已登录 / 未登录（点开登录抽屉） */}
-        {user ? (
-          <div className="rounded-(--r-lg) bg-s1 p-4 elev-1 flex items-center gap-3.5 a-rise">
-            <Avatar size={56} name={user.nickname} hue={280} ring />
-            <div className="flex-1 min-w-0">
-              <div className="text-[16px] font-bold text-on truncate">{user.nickname}</div>
-              <div className="text-[11px] text-mut mt-0.5">@{user.username} · ID {user.id}</div>
-              <div className="flex gap-3 mt-2 text-[10.5px] text-mut">
-                <span>点赞 <b className="text-on">{fmt(user.counts?.like)}</b></span>
-                <span>收藏 <b className="text-on">{fmt(user.counts?.collect)}</b></span>
-                <span>关注 <b className="text-on">{fmt(user.counts?.following)}</b></span>
-              </div>
+      <div className="flex-1 scroll-y px-4 pt-2 pb-28">
+        {/* 资料卡：本地模式 */}
+        <div className="rounded-(--r-lg) bg-s1 p-4 elev-1 flex items-center gap-3.5 a-rise">
+          <Avatar size={56} name="本地用户" hue={150} ring />
+          <div className="flex-1 min-w-0">
+            <div className="text-[16px] font-bold text-on">本地用户</div>
+            <div className="text-[11px] text-mut mt-0.5">数据保存在本机 · 可在设置中导出备份</div>
+            <div className="flex gap-3 mt-2 text-[10.5px] text-mut">
+              <span>收藏 <b className="text-on">{favs.length}</b></span>
+              <span>喜欢 <b className="text-on">{likes.length}</b></span>
+              <span>观看 <b className="text-on">{history.length}</b></span>
             </div>
-            <button onClick={async () => { await logout(); }}
-              className="w-9 h-9 rounded-full bg-s3 flex items-center justify-center text-mut pressable" aria-label="退出登录">
-              <ILogout size={17} />
-            </button>
           </div>
-        ) : (
-          <button onClick={() => setLoginOpen(true)}
-            className="w-full text-left rounded-(--r-lg) bg-s1 p-4 elev-1 flex items-center gap-3.5 pressable a-rise">
-            <Avatar size={56} icon={<IUser size={26} />} hue={220} ring />
-            <div className="flex-1 min-w-0">
-              <div className="text-[16px] font-bold text-on">未登录</div>
-              <div className="text-[11px] text-mut mt-0.5">登录后可同步点赞、收藏与评论</div>
-              <div className="flex gap-3 mt-2 text-[10.5px] text-mut">
-                <span>收藏 <b className="text-on">{favs.length}</b></span>
-                <span>观看 <b className="text-on">{history.length}</b></span>
-              </div>
-            </div>
-            <span className="flex items-center gap-0.5 h-8 pl-3 pr-2 rounded-full bg-primary text-on-primary text-[11.5px] font-semibold">
-              登录<IChevR size={13} />
-            </span>
-          </button>
-        )}
+        </div>
 
-        {/* 我的内容 */}
+        {/* 离线视频入口 */}
+        <button onClick={() => push({ kind: "downloads" })}
+          className="mt-3 w-full rounded-(--r-md) bg-s2 px-3.5 py-3 flex items-center gap-3 text-left pressable elev-1">
+          <span className="w-9 h-9 rounded-full bg-primary/15 text-primary flex items-center justify-center shrink-0"><IDownload size={17} /></span>
+          <div className="flex-1 min-w-0">
+            <div className="text-[13px] font-semibold text-on">离线视频</div>
+            <div className="text-[10.5px] text-mut mt-0.5">
+              下载中 {dlCount.run} 集 · 已完成 {dlCount.done} 集 · 可暂停 / 继续 / 删除
+            </div>
+          </div>
+          {dlCount.run > 0 && (
+            <span className="px-1.5 h-5 rounded-full bg-primary text-on-primary text-[10px] font-bold flex items-center">{dlCount.run}</span>
+          )}
+          <IChevR size={15} className="text-mut" />
+        </button>
+
+        {/* 皮肤：5 套流行配色，点一下立即生效 */}
+        <div className="mt-3 rounded-(--r-md) bg-s2 px-3.5 py-3 elev-1">
+          <div className="flex items-center gap-2">
+            <span className="text-[12.5px] font-semibold text-on">皮肤</span>
+            <span className="text-[10px] text-mut">点击立即更换 · 全 App 生效</span>
+            <span className="ml-auto text-[10px] text-primary">{SKINS.find((s) => s.id === skin)?.name}</span>
+          </div>
+          <div className="mt-2.5 grid grid-cols-5 gap-2">
+            {SKINS.map((s) => {
+              const on = s.id === skin;
+              return (
+                <button key={s.id} onClick={() => { setSkin(s.id); toast(`已切换到「${s.name}」皮肤`, "ok"); }}
+                  aria-pressed={on} className="flex flex-col items-center gap-1.5 pressable">
+                  <span className="relative w-10 h-10 rounded-full flex items-center justify-center"
+                    style={{
+                      background: `radial-gradient(circle at 32% 28%, ${s.dot}, ${s.dot}55 70%)`,
+                      boxShadow: on ? `0 0 0 2px var(--p-bg), 0 0 0 4px ${s.dot}` : "inset 0 0 0 1px rgba(255,255,255,.12)",
+                    }}>
+                    {on && <ICheck size={15} strokeWidth={2.6} className="text-black/70" />}
+                  </span>
+                  <span className={`text-[10px] font-semibold ${on ? "text-on" : "text-mut"}`}>{s.name}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 我的内容：观看历史在前，我的收藏在后 */}
         <div className="flex bg-s3 rounded-(--r-ctl) p-1 mt-4">
-          {([["fav", "我的收藏"], ["history", "观看历史"]] as const).map(([k, l]) => (
+          {([["history", "观看历史"], ["fav", "我的收藏"]] as const).map(([k, l]) => (
             <button key={k} onClick={() => setTab(k)}
               className={`flex-1 h-8 rounded-(--r-ctl) text-[12px] font-semibold pressable ${tab === k ? "tonal text-on-sec" : "text-mut"}`}
               style={tab === k ? { background: "var(--p-sec)", color: "var(--p-primary)" } : undefined}>{l}</button>

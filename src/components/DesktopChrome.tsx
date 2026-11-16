@@ -60,7 +60,7 @@ export function DesktopTitleBar({ collapsed, onToggle }: { collapsed: boolean; o
 }
 
 export function DesktopRail({ collapsed }: { collapsed: boolean }) {
-  const { tab, setTab, user, setLoginOpen, push, platform, stack } = useStore();
+  const { tab, setTab, push, platform, stack } = useStore();
   /* 从侧栏进入的栈页（排行榜 / 设置）接管高亮，否则「我的」会一直亮着，看起来不像独立页面 */
   const top = stack[stack.length - 1];
   const railPage: "ranks" | "settings" | null =
@@ -103,11 +103,11 @@ export function DesktopRail({ collapsed }: { collapsed: boolean }) {
           </button>
         </div>
         <div className="win-sidebar-bottom">
-          <button className="win-account" onClick={() => { setTab("profile"); if (!user) setLoginOpen(true); }}>
-            <Avatar size={34} hue={220} name={user?.nickname} icon={user ? undefined : <IUser size={17} />} />
+          <button className="win-account" onClick={() => setTab("profile")}>
+            <Avatar size={34} hue={150} name="本地用户" />
             <span className="win-account-copy">
-              <strong>{user?.nickname || "登录 HGhub"}</strong>
-              <small>{user ? "你的精彩，都在这里" : "留住每一次心动"}</small>
+              <strong>本地用户</strong>
+              <small>数据保存在本机 · 设置中可备份</small>
             </span>
           </button>
           <span className="win-sidebar-version">HGhub for {platform === "macos" ? "macOS" : platform === "linux" ? "Linux" : "Windows"} {APP_VERSION}</span>

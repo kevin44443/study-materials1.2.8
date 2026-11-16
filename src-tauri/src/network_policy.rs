@@ -42,8 +42,12 @@ pub fn cli_strict_override() -> Option<bool> {
     )
 }
 
-static STRICT: Lazy<AtomicBool> =
-    Lazy::new(|| AtomicBool::new(cli_strict_override().unwrap_or(true)));
+static STRICT: Lazy<AtomicBool> = Lazy::new(|| {
+    // 安卓端默认兼容模式：手机上普遍存在代理 TUN / DNS64 / 自定义 FakeIP 网段，
+    // 严格模式会拦截这类 DNS 结果导致开箱不可用（见 docs/security.md 的兼容性限制）。
+    // 桌面端保持默认严格。仍可在应用「设置」里随时切换。
+    AtomicBool::new(cli_strict_override().unwrap_or(cfg!(not(target_os = "android"))))
+});
 static SECURITY_FILE: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new(None));
 
 /// 当前是否启用严格安全模式（默认开启）。
